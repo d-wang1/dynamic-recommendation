@@ -1,0 +1,8 @@
+{
+    "dataset": {
+        "path": "./ml-1m",
+        "movies_file": "movies.dat",
+        "ratings_file": "ratings.dat",
+        "users_file": "users.dat"
+    }
+}
