@@ -5,5 +5,26 @@
         "ratings_file": "ratings.dat",
         "users_file": "users.dat"
     },
-    "neumf_ckpt": "./neumf_ckpt.model"
+    "neumf_ckpt": "./neumf_ckpt.model",
+    "neumf_table": "./neumf_movie_tables.pt",
+    "model_hyperparams": {
+        "d_emb": 8,
+        "mlp_layers": [64, 32, 16],
+        "lr": 1e-3,
+        "batch_size": 256
+    },
+    "comet_logger": {
+        "api_key": "mtz39dGMtfA0IRQ957SdlU8G1"
+    },
+    "verbose": true,
+    "train": {
+        "max_epochs": 50,
+        "accelerator": "auto",
+        "num_workers": 7,
+        "log_every_n_steps": 20,
+        "enable_progress_bar": true,
+        "enable_model_summary": true,
+        "save_top_k_checkpoints": 3,
+        "ckpt_dir": "./checkpoints"
+    }
 }

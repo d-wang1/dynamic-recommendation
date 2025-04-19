@@ -5,6 +5,7 @@ import torch
 import os
 from data.objs import Genre, genre_map
 from pathlib import Path
+from data.datasets import ML1MDataModule
 
 def load_config(config_path = None, verbose=False) -> dict:
     if config_path is None:
@@ -115,3 +116,42 @@ def gen_demographic_table(config_path = None, verbose=False):
     return ratings[["uid", "mid", "Rating", "Timestamp"]], demog, len(uid_map), len(mid_map)
 
 
+def load_save_neumf_table(config_path = None, verbose=False):
+    cfg = load_config(config_path=config_path, verbose=verbose)
+    ckpt_path = (Path(__file__).resolve().parent.parent / cfg["neumf_ckpt"]).resolve()
+    assert os.path.exists(ckpt_path), f"Checkpoint file {ckpt_path} does not exist."
+    ckpt = torch.load(ckpt_path, map_location="cpu")
+    state = ckpt if isinstance(ckpt, dict) else ckpt["model"]
+    assert "embedding_item_mf.weight" in state.keys() and "embedding_item_mlp.weight" in state.keys(), "Invalid checkpoint keys. Check the keys with state.keys()"
+    item_gmf = state["embedding_item_mf.weight"].clone()   # shape (n_items, d)
+    item_mlp = state["embedding_item_mlp.weight"].clone()  # same shape
+
+
+    neumf_table_path =(Path(__file__).resolve().parent.parent / cfg["neumf_table"]).resolve()
+    torch.save({"item_gmf": item_gmf,
+                "item_mlp": item_mlp}, neumf_table_path)
+    if verbose:
+        print("Saved GMF and MLP tables to", neumf_table_path)
+    return item_gmf, item_mlp
+
+
+def gen_datamodule(k=3, test_size=0.2, ratings = load_ratings(), random_state=42, verbose=False):
+    # k-shot split
+    if verbose:
+        print("Loading data and demographic table...")
+    ratings, demog, n_users, n_movies = gen_demographic_table(verbose=verbose)
+    user_ids = ratings.uid.unique()                         # array of ~6 000 uids
+    n_val = int(len(user_ids) * test_size)
+    val_uids = set(
+        pd.Series(user_ids).sample(n=n_val, random_state=random_state)
+    )
+    train_df = ratings[~ratings.uid.isin(val_uids)]
+    val_df   = ratings[ratings.uid.isin(val_uids)]
+    if verbose:
+        print(f"Train set size: {len(train_df)}, Validation set size: {len(val_df)}")
+    dm = ML1MDataModule(train_df, val_df, demog,
+                    batch_size=256,
+                    k=3)
+    if verbose:
+        print("Data module created.")
+    return dm, n_users, n_movies, demog

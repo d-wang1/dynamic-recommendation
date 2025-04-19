@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
 from models.support_set_encoder import SupportSetEncoder
+from torchmetrics import MeanSquaredError
 
 
 class DCHyperNeuMF(pl.LightningModule):
@@ -25,7 +26,7 @@ class DCHyperNeuMF(pl.LightningModule):
         self.item_gmf = nn.Embedding(n_movies, d_emb)
         self.item_mlp = nn.Embedding(n_movies, d_emb)
 
-        # TODO: Later load pre‑trained weights and freeze them:
+        # Later load pre‑trained weights and freeze them: (UPDATE: Doing this in train.py)
         # for p in self.item_gmf.parameters(): p.requires_grad_(False)
 
         # Support Set Encoder (SSE) for k (movie, rating) pairs as a "vibe" vector
@@ -53,6 +54,11 @@ class DCHyperNeuMF(pl.LightningModule):
         # Dense layer + RELU each time
         self.mlp_head = nn.Sequential(*mlp_units)
         # Join GMF and MLP for one singular prediction score
+
+        # Scalar GMF option
+        # self.out = nn.Linear(1 + mlp_layers[-1], 1)
+
+        # Vector GMF option
         self.out = nn.Linear(d_emb + mlp_layers[-1], 1)
 
         self.lr = lr
@@ -88,7 +94,11 @@ class DCHyperNeuMF(pl.LightningModule):
         v_gmf = self.item_gmf(query_movies)
         v_mlp = self.item_mlp(query_movies)
 
-        gmf = (u_gmf * v_gmf).sum(dim=1, keepdim=True)     # (batch,1)
+        # Scalar GMF option
+        # gmf = (u_gmf * v_gmf).sum(dim=1, keepdim=True)     # (batch,1)
+
+        # Vector GMF option
+        gmf = u_gmf * v_gmf
         mlp = self.mlp_head(torch.cat([u_mlp, v_mlp], 1))  # (batch, h)
         pred = self.out(torch.cat([gmf, mlp], 1)).squeeze(1)  # (batch,)
         return pred                                          # raw score
@@ -99,6 +109,12 @@ class DCHyperNeuMF(pl.LightningModule):
         loss = F.mse_loss(y_hat, q_r)
         self.log("train_loss", loss)
         return loss
+    
+    def validation_step(self, batch, _):
+        d, supp_m, supp_r, q_m, q_r = batch
+        y_hat = self(d, supp_m, supp_r, q_m)
+        rmse = torch.sqrt(F.mse_loss(y_hat, q_r))
+        self.log("val_rmse", rmse, prog_bar=True, sync_dist=True)
 
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=self.lr)
