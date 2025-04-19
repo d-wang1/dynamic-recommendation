@@ -4,5 +4,6 @@
         "movies_file": "movies.dat",
         "ratings_file": "ratings.dat",
         "users_file": "users.dat"
-    }
+    },
+    "neumf_ckpt": "./neumf_ckpt.model"
 }

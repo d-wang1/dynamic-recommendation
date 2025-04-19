@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import pytorch_lightning as pl
 
 
+neutral_rating = 3.5  # neutral rating for movies (1-5 scale). REMINDER: Use 3.5 or 3?
 class SupportSetEncoder(nn.Module):
     """
     Compress k (movie, rating) pairs into a single vector r_u ∈ ℝ^d.
@@ -20,11 +21,8 @@ class SupportSetEncoder(nn.Module):
         # (batch, k, d)
         e = self.item_emb(movie_ids)
 
-        # centre ratings so that 3.5 ≈ neutral, → shape (batch, k, 1)
-        w = (ratings - 3.5).unsqueeze(-1)
+        w = (ratings - neutral_rating).unsqueeze(-1)
 
         # weighted average → (batch, d)
         r = (w * e).mean(dim=1)
         return r
-    
-print("Finished")
