@@ -18,6 +18,7 @@ class DCHyperNeuMF(pl.LightningModule):
         demog_dim: int = 32,
         mlp_layers=(64, 32, 16),
         lr: float = 1e-3,
+        encoder_exponent: float = 1.5,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -30,10 +31,11 @@ class DCHyperNeuMF(pl.LightningModule):
         # for p in self.item_gmf.parameters(): p.requires_grad_(False)
 
         # Support Set Encoder (SSE) for k (movie, rating) pairs as a "vibe" vector
-        self.supenc = SupportSetEncoder(self.item_mlp)
+        self.supenc = SupportSetEncoder(self.item_mlp, exponent=encoder_exponent)
 
         # Forge a lens from "vibe" and demographic vector
         in_dim = demog_dim + d_emb
+
         hid = 2 * d_emb
         # Simple small hypernetwork that takes in a demographic vector and a "vibe" vector (from SSE) and produces two vectors of size d_emb each (separate later).
         # The first one is used in the GMF part of the model, and the second one is used in the MLP part of the model.
