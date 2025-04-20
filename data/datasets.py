@@ -1,7 +1,6 @@
 import torch, random
 from torch.utils.data import Dataset, DataLoader
 import pytorch_lightning as pl
-from data.helper import load_config
 
 class ColdStartDataset(Dataset):
     def __init__(self, ratings_df, demog_tensor, k=3):
@@ -19,10 +18,9 @@ class ColdStartDataset(Dataset):
         uid = self.users[idx]
         # All the ratings that the users ever gave, in history
         hist = self.user_hist[uid]
-        random.shuffle(hist)
         # Support set for k-shot predictions
-        supp = hist[: self.k]
-        # The remainder for predictions / loss
+        random.shuffle(hist)
+        supp = hist[: self.k]          # if k=0 → supp = []
         query = hist[self.k :]              # at least 1 because ML‑1M is dense
 
         # tuples → separate lists
@@ -44,7 +42,6 @@ class ML1MDataModule(pl.LightningDataModule):
         self.train = ColdStartDataset(train_df, demog, k)
         self.val   = ColdStartDataset(val_df,   demog, k)
         self.bs = batch_size
-        self.num_workers = load_config()["train"]["num_workers"]
 
     def collate(self, batch):
         # pad support to length k, pad query to length 1 (use first q movie)
@@ -59,7 +56,7 @@ class ML1MDataModule(pl.LightningDataModule):
         return demo, s_m, s_r, q_m, q_r
 
     def train_dataloader(self):
-        return DataLoader(self.train, self.bs, shuffle=True, num_workes = self.num_workers, collate_fn=self.collate)
+        return DataLoader(self.train, self.bs, shuffle=True, collate_fn=self.collate)
 
     def val_dataloader(self):
-        return DataLoader(self.val, self.bs, shuffle=False, num_workers=self.num_workers, collate_fn=self.collate)
+        return DataLoader(self.val, self.bs, shuffle=False, collate_fn=self.collate)

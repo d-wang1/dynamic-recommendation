@@ -4,3 +4,4 @@ __pycache__/
 checkpoints/
 data/__pycache__/*
 models/__pycache__/*
+test.py

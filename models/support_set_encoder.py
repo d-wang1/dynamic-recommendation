@@ -14,15 +14,13 @@ class SupportSetEncoder(nn.Module):
         self.item_emb = item_emb          # frozen movie table
 
     def forward(self, movie_ids, ratings):
-        """
-        movie_ids : (batch, k)  int64
-        ratings   : (batch, k)  float32   values 1–5
-        """
-        # (batch, k, d)
-        e = self.item_emb(movie_ids)
-
-        w = (ratings - neutral_rating).unsqueeze(-1)
-
-        # weighted average → (batch, d)
-        r = (w * e).mean(dim=1)
-        return r
+        # movie_ids: (batch, k), ratings: (batch, k)
+        batch, k = movie_ids.shape
+        if k == 0:
+            # return a zero "vibe" vector for every batch row
+            d = self.item_emb.embedding_dim
+            return torch.zeros(batch, d, device=movie_ids.device)
+        # else do the usual weighted average
+        e = self.item_emb(movie_ids)                   # (batch, k, d)
+        w = (ratings - 3.5).unsqueeze(-1)               # center
+        return (w * e).mean(dim=1) 
