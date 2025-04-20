@@ -23,7 +23,7 @@ from data.helper import (
     load_save_neumf_table,
 )
 from models.hyper_neumf import DCHyperNeuMF
-
+from data.objs import AGE_BUCKETS, OCCUPATIONS
 # --- 1. Setup & caching -------------------------------------------------
 @st.cache_resource
 def setup_everything(config_path=None):
@@ -75,30 +75,39 @@ topk = st.sidebar.slider("Top-K", 5, 20, 10)
 
 def vectorized_scores(model, demog_row, supp_m, supp_r):
     """
-    Scores all movies in one go with the vector‐GMF branch.
+    Scores all movies in one go with the gated GMF/MLP branches.
     Returns a tensor of shape (n_items,) of raw scores.
     """
     with torch.no_grad():
-        # 1) Make user vectors (1, d_emb)
+        # 1) Build the user embeddings (1, d_emb)
         u_gmf, u_mlp = model.make_user_embs(
-            demog_row.unsqueeze(0),
-            supp_m.unsqueeze(0),
-            supp_r.unsqueeze(0),
+            demog_row.unsqueeze(0),    # → (1, demog_dim)
+            supp_m.unsqueeze(0),       # → (1, k)
+            supp_r.unsqueeze(0),       # → (1, k)
         )
-        # 2) Pull frozen tables
+
+        # 2) Grab frozen item tables
         V_gmf = model.item_gmf.weight    # (n_items, d_emb)
         V_mlp = model.item_mlp.weight    # (n_items, d_emb)
 
-        # 3) VECTOR GMF branch
-        gmf = u_gmf * V_gmf              # (n_items, d_emb)
+        # 3) GMF branch (vector element‐wise)
+        gmf_vec = u_gmf * V_gmf          # (n_items, d_emb)
 
         # 4) MLP branch
-        um = u_mlp.repeat(len(V_mlp), 1)                     # (n_items, d_emb)
-        mlp_feats = model.mlp_head(torch.cat([um, V_mlp], 1))  # (n_items, mlp_dim)
+        um      = u_mlp.repeat(len(V_mlp), 1)             # (n_items, d_emb)
+        mlp_feats = model.mlp_head(torch.cat([um, V_mlp], 1))  # (n_items, mlp_last)
 
-        # 5) Fuse & score
-        feats  = torch.cat([gmf, mlp_feats], dim=1)  # (n_items, d_emb+mlp_dim)
-        scores = model.out(feats).squeeze(1)         # (n_items,)
+        # 5) Compute the gating weight α∈(0,1) per item
+        gate_in = torch.cat([gmf_vec, mlp_feats], dim=1)  # (n_items, d_emb+mlp_last)
+        alpha = model.gate(gate_in)                     # (n_items, 1)
+
+        # 6) Score each branch separately
+        s_gmf = model.out_gmf(gmf_vec)       # (n_items, 1)
+        s_mlp = model.out_mlp(mlp_feats)     # (n_items, 1)
+
+        # 7) Fuse via the learned gate
+        scores = (alpha * s_gmf + (1 - alpha) * s_mlp).squeeze(1)  # (n_items,)
+
         return scores
 
 
@@ -151,36 +160,59 @@ if mode == "Existing User":
 
 else:  # New User
     st.markdown("### Enter New User Profile")
-    gender = st.radio("Gender", ["M", "F"])
-    age    = st.selectbox("Age bucket", list(range(1, 8)))
-    occ    = st.number_input("Occupation code (0–20)", 0, 20, 0)
-    zp     = st.text_input("ZIP prefix (2 digits)", "63")
-    d_row  = torch.tensor(
-        [1 if gender=="F" else 0, age, occ, int(zp)],
-        dtype=torch.long
+
+    # — Age bucket dropdown —
+    age_key = st.selectbox(
+        "Age bucket",
+        options=list(AGE_BUCKETS.keys()),
+        format_func=lambda x: AGE_BUCKETS[x],
     )
+
+    gender = st.radio("Gender", ["M", "F"])
+
+    # — Occupation dropdown —
+    occ_key = st.selectbox(
+        "Occupation",
+        options=list(OCCUPATIONS.keys()),
+        format_func=lambda x: OCCUPATIONS[x],
+    )
+
+    zp = st.text_input("ZIP prefix (first 2 digits)", "63")
+
+    # build the demographic vector in the same order your model expects:
+    # [gender_id (0=M,1=F), age_bucket_code, occupation_code, zip_prefix]
+    d_row = torch.tensor([
+        1 if gender == "F" else 0,
+        age_key,
+        occ_key,
+        int(zp)
+    ], dtype=torch.long)
 
     k = st.slider("Number of support ratings (k)", 0, 10, 0)
     supp_m_list, supp_r_list = [], []
     if k > 0:
         st.markdown(f"#### Enter {k} sample ratings")
         for i in range(k):
-            movie = st.selectbox(f"Movie #{i+1}", titles, key=f"m{i}")
-            rating= st.slider(f"Rating for '{movie}'", 1.0, 5.0, 3.0, key=f"r{i}")
+            movie = st.selectbox(f"Movie #{i+1}", titles, key=f"new_m{i}")
+            rating = st.slider(f"Rating for '{movie}'", 1.0, 5.0, 3.0, key=f"new_r{i}")
             supp_m_list.append(titles.index(movie))
             supp_r_list.append(rating)
-    # build the tensors—even if empty
+
     supp_m = torch.tensor(supp_m_list, dtype=torch.long)
     supp_r = torch.tensor(supp_r_list, dtype=torch.float)
 
     if st.button("Recommend"):
-        # st.write("Support movie IDs:", supp_m.tolist())
-        # st.write("Support ratings:  ", supp_r.tolist())
-        # u_gmf, u_mlp = model.make_user_embs(d_row.unsqueeze(0), supp_m.unsqueeze(0), supp_r.unsqueeze(0))
-        # st.write("u_gmf[:5]:", u_gmf[0,:5].tolist())
-        scores = vectorized_scores(model, d_row, supp_m, supp_r)  # (n_items,)
+        # st.write("Demographics:", {
+        #     "Gender": gender,
+        #     "Age": AGE_BUCKETS[age_key],
+        #     "Occupation": OCCUPATIONS[occ_key],
+        #     "ZIP": zp,
+        # })
+        # st.write("Support set (movie IDs / ratings):", list(zip(supp_m_list, supp_r_list)))
+
+        scores = vectorized_scores(model, d_row, supp_m, supp_r)
         vals, idxs = scores.topk(topk)
+
         st.markdown("### Top Recommendations")
         for score, idx in zip(vals.cpu().tolist(), idxs.cpu().tolist()):
-            # print(score, idx)
             st.write(f"- **{titles[idx]}** (predicted {score:.2f})")

@@ -59,7 +59,14 @@ class DCHyperNeuMF(pl.LightningModule):
         # self.out = nn.Linear(1 + mlp_layers[-1], 1)
 
         # Vector GMF option
-        self.out = nn.Linear(d_emb + mlp_layers[-1], 1)
+        self.gate = nn.Sequential(
+            nn.Linear(d_emb + mlp_layers[-1], 1),
+            nn.Sigmoid()
+        )
+        # 2) GMF‐only output (no bias, since popularity biases are baked into embeddings)
+        self.out_gmf = nn.Linear(d_emb, 1, bias=False)
+        # 3) MLP‐only output (with bias)
+        self.out_mlp = nn.Linear(mlp_layers[-1], 1, bias=True)
 
         self.lr = lr
 
@@ -88,20 +95,29 @@ class DCHyperNeuMF(pl.LightningModule):
         supp_ratings : (batch, k)
         query_movies : (batch,)      1 movie per row for simplicity
         """
-        u_gmf, u_mlp = self.make_user_embs(
-            demog_vec, supp_movies, supp_ratings
-        )
+        # 1) make user embs
+        u_gmf, u_mlp = self.make_user_embs(demog_vec, supp_movies, supp_ratings)
+
+        # 2) pull item embs
         v_gmf = self.item_gmf(query_movies)
         v_mlp = self.item_mlp(query_movies)
 
-        # Scalar GMF option
-        # gmf = (u_gmf * v_gmf).sum(dim=1, keepdim=True)     # (batch,1)
+        # 3) GMF branch vector
+        gmf_vec = u_gmf * v_gmf                        # (batch, d_emb)
+        # 4) MLP branch vector
+        mlp_feats = self.mlp_head(torch.cat([u_mlp, v_mlp], dim=1))  # (batch, mlp_last)
 
-        # Vector GMF option
-        gmf = u_gmf * v_gmf
-        mlp = self.mlp_head(torch.cat([u_mlp, v_mlp], 1))  # (batch, h)
-        pred = self.out(torch.cat([gmf, mlp], 1)).squeeze(1)  # (batch,)
-        return pred                                          # raw score
+        # 5) compute gate α ∈ [0,1]
+        gate_in = torch.cat([gmf_vec, mlp_feats], dim=1)  # (batch, d_emb+mlp_last)
+        alpha = self.gate(gate_in)                            # (batch, 1)
+        self.alpha = alpha.squeeze(1)                          # (batch,)
+        # 6) each branch’s scalar score
+        s_gmf = self.out_gmf(gmf_vec)      # (batch, 1)
+        s_mlp = self.out_mlp(mlp_feats)    # (batch, 1)
+
+        # 7) combine with learned gate
+        pred = alpha * s_gmf + (1 - alpha) * s_mlp  # (batch, 1)
+        return pred.squeeze(1)             # (batch,)
 
     def training_step(self, batch, _):
         d, supp_m, supp_r, q_m, q_r = batch   # unpack
@@ -115,6 +131,8 @@ class DCHyperNeuMF(pl.LightningModule):
         y_hat = self(d, supp_m, supp_r, q_m)
         rmse = torch.sqrt(F.mse_loss(y_hat, q_r))
         self.log("val_rmse", rmse, prog_bar=True, sync_dist=True)
+        self.log("gate_mean", self.alpha.mean(), prog_bar=True)
+
 
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=self.lr)

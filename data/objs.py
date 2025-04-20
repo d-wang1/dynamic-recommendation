@@ -1,43 +1,33 @@
-from enum import Enum, auto
+AGE_BUCKETS = {
+    1:  "Under 18",
+    18: "18-24",
+    25: "25-34",
+    35: "35-44",
+    45: "45-49",
+    50: "50-55",
+    56: "56+"
+}
 
-class Genre(Enum):
-    ACTION = auto()
-    ADVENTURE = auto()
-    ANIMATION = auto()
-    CHILDRENS = auto()
-    COMEDY = auto()
-    CRIME = auto()
-    DOCUMENTARY = auto()
-    DRAMA = auto()
-    FANTASY = auto()
-    FILM_NOIR = auto()
-    HORROR = auto()
-    MUSICAL = auto()
-    MYSTERY = auto()
-    ROMANCE = auto()
-    SCIFI = auto()
-    THRILLER = auto()
-    WAR = auto()
-    WESTERN = auto()
-    UNKNOWN = auto()
-
-genre_map = {
-    "Action": Genre.ACTION,
-    "Adventure": Genre.ADVENTURE,
-    "Animation": Genre.ANIMATION,
-    "Children's": Genre.CHILDRENS,
-    "Comedy": Genre.COMEDY,
-    "Crime": Genre.CRIME,
-    "Documentary": Genre.DOCUMENTARY,
-    "Drama": Genre.DRAMA,
-    "Fantasy": Genre.FANTASY,
-    "Film-Noir": Genre.FILM_NOIR,
-    "Horror": Genre.HORROR,
-    "Musical": Genre.MUSICAL,
-    "Mystery": Genre.MYSTERY,
-    "Romance": Genre.ROMANCE,
-    "Sci-Fi": Genre.SCIFI,
-    "Thriller": Genre.THRILLER,
-    "War": Genre.WAR,
-    "Western": Genre.WESTERN
+OCCUPATIONS = {
+     0: "other / not specified",
+     1: "academic / educator",
+     2: "artist",
+     3: "clerical / admin",
+     4: "college / grad student",
+     5: "customer service",
+     6: "doctor / health care",
+     7: "executive / managerial",
+     8: "farmer",
+     9: "homemaker",
+    10: "K‑12 student",
+    11: "lawyer",
+    12: "programmer",
+    13: "retired",
+    14: "sales / marketing",
+    15: "scientist",
+    16: "self‑employed",
+    17: "technician / engineer",
+    18: "tradesman / craftsman",
+    19: "unemployed",
+    20: "writer",
 }

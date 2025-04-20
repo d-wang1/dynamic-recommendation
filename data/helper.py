@@ -3,7 +3,6 @@ import numpy as np
 import json
 import torch
 import os
-from data.objs import Genre, genre_map
 from pathlib import Path
 from data.datasets import ML1MDataModule
 
