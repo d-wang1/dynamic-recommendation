@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import pytorch_lightning as pl
 from models.support_set_encoder import SupportSetEncoder
 from torchmetrics import MeanSquaredError
+from data.objs import AGE2IDX
 
 
 class DCHyperNeuMF(pl.LightningModule):
@@ -35,6 +36,21 @@ class DCHyperNeuMF(pl.LightningModule):
 
         # Forge a lens from "vibe" and demographic vector
         in_dim = demog_dim + d_emb
+
+        demog_emb_dim = d_emb    # you can tune this
+        # gender: 0/1
+        self.gender_emb = nn.Embedding(2, demog_emb_dim)
+        # age buckets: 7 codes (1,18,25,35,45,50,56)
+        self.age_emb    = nn.Embedding(7, demog_emb_dim)
+        # occupation: 21 codes (0–20)
+        self.occ_emb    = nn.Embedding(21, demog_emb_dim)
+        # zip‑prefix: e.g. 100 possible 2‑digit prefixes
+        self.zip_emb    = nn.Embedding(100, demog_emb_dim)
+          # new combined demog feature size:
+        demog_feat_dim = demog_emb_dim * 4
+        # fuse demog + “vibe”
+        in_dim = demog_feat_dim + d_emb
+
 
         hid = 2 * d_emb
         # Simple small hypernetwork that takes in a demographic vector and a "vibe" vector (from SSE) and produces two vectors of size d_emb each (separate later).
@@ -83,6 +99,16 @@ class DCHyperNeuMF(pl.LightningModule):
         r_vec = self.supenc(movie_ids, ratings)            # (batch, d_emb)
         # Combine demographic and preference information
         h_inp = torch.cat([demog_vec, r_vec], dim=1)
+
+        g = self.gender_emb(demog_vec[:, 0])
+        raw_ages = demog_vec[:, 1].tolist()     # e.g. [1,25,56,...]
+        idxs     = [AGE2IDX.get(int(age), 0) for age in raw_ages]
+        a = self.age_emb(torch.tensor(idxs, device=demog_vec.device))
+        o = self.occ_emb   (demog_vec[:, 2])
+        z = self.zip_emb   (demog_vec[:, 3])
+        demog_feat = torch.cat([g, a, o, z], dim=1)  # (batch, 4*demog_emb_dim)
+        # Combine demographic embedding and “vibe”
+        h_inp = torch.cat([demog_feat, r_vec], dim=1)
         # Create lens to use in GMF and MLP parts of the model
         u = self.hyper(h_inp)                              # (batch, 2d)
         u_gmf, u_mlp = u.chunk(2, dim=1)

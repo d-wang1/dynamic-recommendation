@@ -8,6 +8,9 @@ AGE_BUCKETS = {
     56: "56+"
 }
 
+AGE_BUCKET_CODES = [1, 18, 25, 35, 45, 50, 56]
+AGE2IDX = {code: idx for idx, code in enumerate(AGE_BUCKET_CODES)}
+
 OCCUPATIONS = {
      0: "other / not specified",
      1: "academic / educator",

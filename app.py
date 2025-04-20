@@ -60,10 +60,19 @@ def setup_everything(config_path=None):
         if internal is not None:
             titles[internal] = row.Title
 
-    return model, ratings_int, demog_tensor, titles
+
+
+    raw = load_ratings(config_path=config_path, verbose=False)
+    gm = raw.groupby("mid")["Rating"].mean().reset_index()
+    global_means = torch.zeros(n_items)
+    for _, r in gm.iterrows():
+        global_means[int(r.mid)] = r.Rating
+
+
+    return model, ratings_int, demog_tensor, titles, global_means
 
 # Initialize everything
-model, ratings_df, demog_tensor, titles = setup_everything("config.json")
+model, ratings_df, demog_tensor, titles, global_means = setup_everything("config.json")
 
 
 # --- 2. Streamlit GUI ----------------------------------------------------
@@ -152,11 +161,22 @@ if mode == "Existing User":
         # Vectorized scoring using the *edited* support set
         scores = vectorized_scores(model, d, supp_m, supp_r)  # (n_items,)
         vals, idxs = scores.topk(topk)
+        # 1) raw predicted scores
+        scores = vectorized_scores(model, d, supp_m, supp_r)
+        # 2) subtract global popularity → residuals
+        residuals = scores - global_means
+        # 3) pick Top‑K by residual
+        vals, idxs = residuals.topk(topk)
+
+
 
         st.markdown("### Top Recommendations")
-        for score, idx in zip(vals.cpu().tolist(), idxs.cpu().tolist()):
-            # print(score, idx)
-            st.write(f"- **{titles[idx]}** (predicted {score:.2f})")
+        for delta, idx in zip(vals.cpu().tolist(), idxs.cpu().tolist()):
+            raw = scores[idx].item()
+            st.write(
+                f"- **{titles[idx]}**  "
+                f"(pred {raw:.2f}, Δ={delta:+.2f})"
+            )
 
 else:  # New User
     st.markdown("### Enter New User Profile")
@@ -212,7 +232,19 @@ else:  # New User
 
         scores = vectorized_scores(model, d_row, supp_m, supp_r)
         vals, idxs = scores.topk(topk)
+        # 1) raw predicted scores
+        scores = vectorized_scores(model, d_row, supp_m, supp_r)
+        # 2) subtract global popularity → residuals
+        residuals = scores - global_means
+        # 3) pick Top‑K by residual
+        vals, idxs = residuals.topk(topk)
+
+
 
         st.markdown("### Top Recommendations")
-        for score, idx in zip(vals.cpu().tolist(), idxs.cpu().tolist()):
-            st.write(f"- **{titles[idx]}** (predicted {score:.2f})")
+        for delta, idx in zip(vals.cpu().tolist(), idxs.cpu().tolist()):
+            raw = scores[idx].item()
+            st.write(
+                f"- **{titles[idx]}**  "
+                f"(pred {raw:.2f}, Δ={delta:+.2f})"
+            )
