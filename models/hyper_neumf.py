@@ -60,6 +60,9 @@ class DCHyperNeuMF(pl.LightningModule):
         self.item_demog = nn.Embedding(n_movies, demog_feat_dim)
         self.out_demog = nn.Linear(demog_feat_dim, 1, bias=True)
 
+        self.demog_bias = nn.Linear(demog_feat_dim, 1, bias=True)
+
+
         total_dim = d_emb + mlp_layers[-1] + demog_feat_dim
         # a single linear layer to produce 3 logits
         self.gate_linear = nn.Linear(total_dim, 3)
@@ -146,8 +149,15 @@ class DCHyperNeuMF(pl.LightningModule):
         wts        = F.softmax(logits / self.temperature, dim=1)       # (B,3)
 
         # ─── fuse branch scores ────────────────────────────────────────────
-        scores     = torch.cat([s_gmf, s_mlp, s_demog], dim=1)          # (B,3)
-        pred       = (wts * scores).sum(dim=1)                          # (B,)
+        scores = torch.cat([s_gmf, s_mlp, s_demog], dim=1)   # (B,3)
+        base   = (wts * scores).sum(dim=1)                   # (B,)
+
+        # ─── demographic‐only bias ─────────────────────────────────────────
+        # dem_feats is what you built above for the demog branch: (B, demog_feat_dim)
+        b_demog = self.demog_bias(dem_feats).squeeze(1)      # (B,)
+
+        # ─── final prediction is branch‐fusion + bias(demo) ───────────────
+        pred = base + b_demog                                # (B,)
         return pred, wts
 
     def training_step(self, batch, batch_idx):

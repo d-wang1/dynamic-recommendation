@@ -18,7 +18,7 @@
     },
     "verbose": true,
     "train": {
-        "max_epochs": 50,
+        "max_epochs": 80,
         "accelerator": "auto",
         "num_workers": 7,
         "log_every_n_steps": 20,
@@ -28,6 +28,6 @@
         "ckpt_dir": "./checkpoints"
     },
     "app": {
-        "ckpt_to_use": "checkpoints/epochepoch=48-rmseval_rmse=0.969.ckpt"
+        "ckpt_to_use": "checkpoints/epochepoch=76-rmseval_rmse=0.977.ckpt"
     }
 }
