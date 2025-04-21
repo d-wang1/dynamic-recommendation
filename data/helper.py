@@ -63,27 +63,6 @@ def load_users(config_path = None, verbose=False) -> pd.DataFrame:
         encoding="ISO‑8859‑1",
     )
 
-# def get_movie_ratings(id, ratings=load_ratings(), exclude_movie_col=True):
-#     movie_ratings = ratings[ratings['MovieID'] == id]
-#     if exclude_movie_col:
-#         return movie_ratings[['UserID', 'Rating']]
-#     else:
-#         return movie_ratings[['UserID', 'MovieID', 'Rating']]
-    
-# def get_movie(id, movies=load_movies()):
-#     movie = movies[movies['MovieID'] == id]
-#     if not movie.empty:
-#         return movie
-#     else:
-#         return None
-    
-# def parse_genres(genre_string):
-#     return [
-#         genre_map[name]
-#         for name in genre_string.split('|')
-#         if name in genre_map
-#     ]
-
 
 def gen_demographic_table(config_path = None, verbose=False):
     movies = load_movies(config_path=config_path, verbose=verbose)

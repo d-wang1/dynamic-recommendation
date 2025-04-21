@@ -23,7 +23,7 @@ from data.helper import (
     load_save_neumf_table,
 )
 from models.hyper_neumf import DCHyperNeuMF
-from data.objs import AGE_BUCKETS, OCCUPATIONS
+from data.objs import AGE_BUCKETS, OCCUPATIONS, AGE2IDX
 # --- 1. Setup & caching -------------------------------------------------
 @st.cache_resource
 def setup_everything(config_path=None):
@@ -62,8 +62,7 @@ def setup_everything(config_path=None):
 
 
 
-    raw = load_ratings(config_path=config_path, verbose=False)
-    gm = raw.groupby("mid")["Rating"].mean().reset_index()
+    gm = ratings_int.groupby("mid")["Rating"].mean().reset_index()
     global_means = torch.zeros(n_items)
     for _, r in gm.iterrows():
         global_means[int(r.mid)] = r.Rating
@@ -83,41 +82,54 @@ topk = st.sidebar.slider("Top-K", 5, 20, 10)
 
 
 def vectorized_scores(model, demog_row, supp_m, supp_r):
-    """
-    Scores all movies in one go with the gated GMF/MLP branches.
-    Returns a tensor of shape (n_items,) of raw scores.
-    """
     with torch.no_grad():
-        # 1) Build the user embeddings (1, d_emb)
+        # 1) user embeddings
         u_gmf, u_mlp = model.make_user_embs(
-            demog_row.unsqueeze(0),    # → (1, demog_dim)
-            supp_m.unsqueeze(0),       # → (1, k)
-            supp_r.unsqueeze(0),       # → (1, k)
-        )
+            demog_row.unsqueeze(0),
+            supp_m.unsqueeze(0),
+            supp_r.unsqueeze(0),
+        )                                   # (1, d_emb) each
 
-        # 2) Grab frozen item tables
-        V_gmf = model.item_gmf.weight    # (n_items, d_emb)
-        V_mlp = model.item_mlp.weight    # (n_items, d_emb)
+        # 2) item tables
+        V_gmf   = model.item_gmf.weight     # (N, d_emb)
+        V_mlp   = model.item_mlp.weight     # (N, d_emb)
+        V_demog = model.item_demog.weight   # (N, demog_feat_dim)
 
-        # 3) GMF branch (vector element‐wise)
-        gmf_vec = u_gmf * V_gmf          # (n_items, d_emb)
+        # 3) branch vectors
+        gmf_vec = u_gmf * V_gmf              # (N, d_emb)
+        um      = u_mlp.repeat(len(V_mlp), 1)
+        mlp_feats = model.mlp_head(torch.cat([um, V_mlp], dim=1))  # (N, mlp_last)
 
-        # 4) MLP branch
-        um      = u_mlp.repeat(len(V_mlp), 1)             # (n_items, d_emb)
-        mlp_feats = model.mlp_head(torch.cat([um, V_mlp], 1))  # (n_items, mlp_last)
+        # demographic vector
+        # rebuild dem_feats as in forward (just replicate for all items):
+        g = model.gender_emb(demog_row[[0]])
+        device = demog_row.device
+        # 1) extract the raw age code, e.g. 25, 56, etc.
+        raw_age = demog_row[1].item()
+        # 2) map to your 0–6 index
+        age_idx = AGE2IDX.get(raw_age, 0)  # default to 0 if missing
+        # 3) make a 1‑element tensor on the right device
+        age_tensor = torch.tensor([age_idx], device=device)
+        # 4) lookup embedding
+        a = model.age_emb(age_tensor)
+        o = model.occ_emb(demog_row[2].unsqueeze(0))
+        z = model.zip_emb(demog_row[3].unsqueeze(0))
+        dem_feats = torch.cat([g,a,o,z], dim=1)                # (1, demog_feat_dim)
+        dem_feats = dem_feats.repeat(len(V_demog), 1)          # (N, demog_feat_dim)
+        dem_in    = dem_feats * V_demog                        # (N, demog_feat_dim)
 
-        # 5) Compute the gating weight α∈(0,1) per item
-        gate_in = torch.cat([gmf_vec, mlp_feats], dim=1)  # (n_items, d_emb+mlp_last)
-        alpha = model.gate(gate_in)                     # (n_items, 1)
+        # 4) branch scores
+        s_gmf   = model.out_gmf(   gmf_vec).squeeze(1)        # (N,)
+        s_mlp   = model.out_mlp(   mlp_feats).squeeze(1)      # (N,)
+        s_demog = model.out_demog(dem_in).squeeze(1)          # (N,)
 
-        # 6) Score each branch separately
-        s_gmf = model.out_gmf(gmf_vec)       # (n_items, 1)
-        s_mlp = model.out_mlp(mlp_feats)     # (n_items, 1)
+        # 5) gate weights
+        gate_in = torch.cat([gmf_vec, mlp_feats, dem_in], dim=1)  # (N, sum_dims)
+        wts     = model.gate3(gate_in)                            # (N,3)
 
-        # 7) Fuse via the learned gate
-        scores = (alpha * s_gmf + (1 - alpha) * s_mlp).squeeze(1)  # (n_items,)
-
-        return scores
+        # 6) final fused scores
+        fused = wts[:,0]*s_gmf + wts[:,1]*s_mlp + wts[:,2]*s_demog  # (N,)
+        return fused
 
 
 if mode == "Existing User":

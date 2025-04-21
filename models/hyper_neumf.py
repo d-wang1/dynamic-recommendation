@@ -16,75 +16,56 @@ class DCHyperNeuMF(pl.LightningModule):
         self,
         n_movies: int,
         d_emb: int = 8,
-        demog_dim: int = 32,
-        mlp_layers=(64, 32, 16),
+        demog_dim: int = 4,       # number of raw demog fields
+        mlp_layers=(64,32,16),
         lr: float = 1e-3,
-        encoder_exponent: float = 1.5,
     ):
         super().__init__()
         self.save_hyperparameters()
 
-        # Movie embeddings. For each movie id, store a linear fingerprint (len d_emb) in GMF and a nonlinear one in MLP.
+        # 1) Item tables (unchanged)
         self.item_gmf = nn.Embedding(n_movies, d_emb)
         self.item_mlp = nn.Embedding(n_movies, d_emb)
-
-        # Later load pre‑trained weights and freeze them: (UPDATE: Doing this in train.py)
-        # for p in self.item_gmf.parameters(): p.requires_grad_(False)
-
-        # Support Set Encoder (SSE) for k (movie, rating) pairs as a "vibe" vector
-        self.supenc = SupportSetEncoder(self.item_mlp, exponent=encoder_exponent)
-
-        # Forge a lens from "vibe" and demographic vector
-        in_dim = demog_dim + d_emb
-
-        demog_emb_dim = d_emb    # you can tune this
-        # gender: 0/1
+        self.supenc    = SupportSetEncoder(self.item_mlp)
+        # 2) Demog embeddings (as you added before)
+        demog_emb_dim = d_emb
         self.gender_emb = nn.Embedding(2, demog_emb_dim)
-        # age buckets: 7 codes (1,18,25,35,45,50,56)
         self.age_emb    = nn.Embedding(7, demog_emb_dim)
-        # occupation: 21 codes (0–20)
         self.occ_emb    = nn.Embedding(21, demog_emb_dim)
-        # zip‑prefix: e.g. 100 possible 2‑digit prefixes
         self.zip_emb    = nn.Embedding(100, demog_emb_dim)
-          # new combined demog feature size:
+
+        # 3) Hypernetwork (unchanged except in_dim)
         demog_feat_dim = demog_emb_dim * 4
-        # fuse demog + “vibe”
         in_dim = demog_feat_dim + d_emb
-
-
-        hid = 2 * d_emb
-        # Simple small hypernetwork that takes in a demographic vector and a "vibe" vector (from SSE) and produces two vectors of size d_emb each (separate later).
-        # The first one is used in the GMF part of the model, and the second one is used in the MLP part of the model.
+        hid    = 2 * d_emb
         self.hyper = nn.Sequential(
             nn.Linear(in_dim, hid),
             nn.ReLU(),
-            nn.Linear(hid, 2 * d_emb),
+            nn.Linear(hid, 2*d_emb),
         )
 
-        # Nonlinear MLP head
+        # 4) MLP head (unchanged)
         mlp_units = []
-        # Takes in both user and movie embeddings
         inp = 2 * d_emb
-        # Create network based on layer sizes
         for h in mlp_layers:
             mlp_units += [nn.Linear(inp, h), nn.ReLU()]
             inp = h
-        # Dense layer + RELU each time
         self.mlp_head = nn.Sequential(*mlp_units)
-        # Join GMF and MLP for one singular prediction score
 
-        # Scalar GMF option
-        # self.out = nn.Linear(1 + mlp_layers[-1], 1)
-
-        # Vector GMF option
-        self.gate = nn.Sequential(
-            nn.Linear(d_emb + mlp_layers[-1], 1),
-            nn.Sigmoid()
-        )
-        # 2) GMF‐only output (no bias, since popularity biases are baked into embeddings)
+        # 5) GMF & MLP outputs
         self.out_gmf = nn.Linear(d_emb, 1, bias=False)
-        # 3) MLP‐only output (with bias)
         self.out_mlp = nn.Linear(mlp_layers[-1], 1, bias=True)
+
+        # 6) Demographic branch
+        self.item_demog = nn.Embedding(n_movies, demog_feat_dim)
+        self.out_demog = nn.Linear(demog_feat_dim, 1, bias=True)
+
+        # 7) 3‑way gate
+        total_dim = d_emb + mlp_layers[-1] + demog_feat_dim
+        self.gate3    = nn.Sequential(
+            nn.Linear(total_dim, 3),
+            nn.Softmax(dim=1)
+        )
 
         self.lr = lr
 
@@ -101,9 +82,13 @@ class DCHyperNeuMF(pl.LightningModule):
         h_inp = torch.cat([demog_vec, r_vec], dim=1)
 
         g = self.gender_emb(demog_vec[:, 0])
-        raw_ages = demog_vec[:, 1].tolist()     # e.g. [1,25,56,...]
-        idxs     = [AGE2IDX.get(int(age), 0) for age in raw_ages]
-        a = self.age_emb(torch.tensor(idxs, device=demog_vec.device))
+        raw_ages = demog_vec[:, 1].tolist()   
+        # 2) map each code to its 0–6 index
+        age_idxs = [AGE2IDX.get(int(a), 0) for a in raw_ages]
+        # 3) turn that back into a tensor on the correct device
+        age_tensor = torch.tensor(age_idxs, device=demog_vec.device, dtype=torch.long)
+        # 4) lookup your embedding
+        a = self.age_emb(age_tensor)
         o = self.occ_emb   (demog_vec[:, 2])
         z = self.zip_emb   (demog_vec[:, 3])
         demog_feat = torch.cat([g, a, o, z], dim=1)  # (batch, 4*demog_emb_dim)
@@ -115,51 +100,70 @@ class DCHyperNeuMF(pl.LightningModule):
         return u_gmf, u_mlp
 
     # ----- forward --------------------------------------------------------
-    def forward(self, demog_vec, supp_movies, supp_ratings, query_movies):
-        """
-        Produce *predicted* ratings for query_movies.
-        demog_vec    : (batch, demog_dim)
-        supp_movies  : (batch, k)
-        supp_ratings : (batch, k)
-        query_movies : (batch,)      1 movie per row for simplicity
-        """
-        # 1) make user embs
-        u_gmf, u_mlp = self.make_user_embs(demog_vec, supp_movies, supp_ratings)
+    def forward(self, demog_vec, supp_m, supp_r, query_m):
+        # 1) user embs
+        u_gmf, u_mlp = self.make_user_embs(demog_vec, supp_m, supp_r)
 
-        # 2) pull item embs
-        v_gmf = self.item_gmf(query_movies)
-        v_mlp = self.item_mlp(query_movies)
+        # 2) lookup item embeddings
+        v_gmf = self.item_gmf(query_m)
+        v_mlp = self.item_mlp(query_m)
 
-        # 3) GMF branch vector
-        gmf_vec = u_gmf * v_gmf                        # (batch, d_emb)
-        # 4) MLP branch vector
-        mlp_feats = self.mlp_head(torch.cat([u_mlp, v_mlp], dim=1))  # (batch, mlp_last)
+        # 3) GMF branch
+        gmf_vec = u_gmf * v_gmf              # (B, d_emb)
+        s_gmf   = self.out_gmf(gmf_vec)      # (B,1)
 
-        # 5) compute gate α ∈ [0,1]
-        gate_in = torch.cat([gmf_vec, mlp_feats], dim=1)  # (batch, d_emb+mlp_last)
-        alpha = self.gate(gate_in)                            # (batch, 1)
-        self.alpha = alpha.squeeze(1)                          # (batch,)
-        # 6) each branch’s scalar score
-        s_gmf = self.out_gmf(gmf_vec)      # (batch, 1)
-        s_mlp = self.out_mlp(mlp_feats)    # (batch, 1)
+        # 4) MLP branch
+        mlp_feat = self.mlp_head(torch.cat([u_mlp, v_mlp], dim=1))  # (B, mlp_last)
+        s_mlp    = self.out_mlp(mlp_feat)                          # (B,1)
 
-        # 7) combine with learned gate
-        pred = alpha * s_gmf + (1 - alpha) * s_mlp  # (batch, 1)
-        return pred.squeeze(1)             # (batch,)
+        # 5) Demographic branch
+        # re‐embed demog_vec exactly as in make_user_embs to get dem_feats
+        g = self.gender_emb(demog_vec[:,0])
+        raw_ages = demog_vec[:, 1].tolist()
+        age_idxs = [AGE2IDX.get(int(a), 0) for a in raw_ages]
+        age_tensor = torch.tensor(age_idxs, device=demog_vec.device, dtype=torch.long)
+        a = self.age_emb(age_tensor)
+        o = self.occ_emb(demog_vec[:,2])
+        z = self.zip_emb(demog_vec[:,3])
+        dem_feats = torch.cat([g,a,o,z], dim=1)       # (B, demog_feat_dim)
+        v_demog   = self.item_demog(query_m)          # (B, demog_feat_dim)
+        dem_in    = dem_feats * v_demog               # (B, demog_feat_dim)
+        s_demog   = self.out_demog(dem_in)            # (B,1)
 
-    def training_step(self, batch, _):
-        d, supp_m, supp_r, q_m, q_r = batch   # unpack
-        y_hat = self(d, supp_m, supp_r, q_m)
-        loss = F.mse_loss(y_hat, q_r)
+        # 6) 3‑way gate & fuse
+        gate_in = torch.cat([gmf_vec, mlp_feat, dem_in], dim=1)  # (B, total_dim)
+        wts     = self.gate3(gate_in)                            # (B,3)
+        scores  = torch.cat([s_gmf, s_mlp, s_demog], dim=1)      # (B,3)
+        pred = (wts * scores).sum(dim=1)
+        return pred, wts
+
+    def training_step(self, batch, batch_idx):
+        d, s_m, s_r, q_m, q_r = batch
+        y_hat, wts = self(d, s_m, s_r, q_m)
+
+        loss_main = F.mse_loss(y_hat, q_r)
+
+        # if an example has k=0 (you can detect s_m.sum(dim=1)==0), encourage demog gate
+        zero_mask = (s_m.sum(dim=1) == 0).float()   # shape (B,)
+        if zero_mask.any():
+            # wts is (B,3), we want column 2 (demog)
+            demog_wt = wts[:,2]                     # (B,)
+            # only compute for zero-shot rows
+            aux = ((1.0 - demog_wt) * zero_mask).mean()
+            loss = loss_main + 0.1 * aux            # weight it lightly
+        else:
+            loss = loss_main
+
         self.log("train_loss", loss)
         return loss
     
     def validation_step(self, batch, _):
-        d, supp_m, supp_r, q_m, q_r = batch
-        y_hat = self(d, supp_m, supp_r, q_m)
+        d, s_m, s_r, q_m, q_r = batch
+        y_hat, wts = self(d, s_m, s_r, q_m)
         rmse = torch.sqrt(F.mse_loss(y_hat, q_r))
         self.log("val_rmse", rmse, prog_bar=True, sync_dist=True)
-        self.log("gate_mean", self.alpha.mean(), prog_bar=True)
+        # log the average weight on the demographic branch (index 2)
+        self.log("gate_demog_weight", wts[:,2].mean(), prog_bar=True)
 
 
     def configure_optimizers(self):
