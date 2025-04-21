@@ -5,7 +5,7 @@ from models.hyper_neumf import DCHyperNeuMF
 from data.objs import AGE2IDX, AGE_BUCKET_CODES
 
 # 1) Paths & hyperparams (adjust to your config)
-CKPT = "checkpoints/epochepoch=43-rmseval_rmse=0.989.ckpt"
+CKPT = "checkpoints/epochepoch=80-rmseval_rmse=0.956.ckpt"
 NEUMF_TABLE = "neumf_movie_tables.pt"
 MOVIES_FILE = "./ml-1m/movies.dat"
 RATINGS_FILE = "./ml-1m/ratings.dat"

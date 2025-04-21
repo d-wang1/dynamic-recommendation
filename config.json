@@ -28,6 +28,6 @@
         "ckpt_dir": "./checkpoints"
     },
     "app": {
-        "ckpt_to_use": "checkpoints/epochepoch=10-rmseval_rmse=0.991.ckpt"
+        "ckpt_to_use": "checkpoints/epochepoch=48-rmseval_rmse=0.969.ckpt"
     }
 }

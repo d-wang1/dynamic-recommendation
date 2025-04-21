@@ -60,12 +60,17 @@ class DCHyperNeuMF(pl.LightningModule):
         self.item_demog = nn.Embedding(n_movies, demog_feat_dim)
         self.out_demog = nn.Linear(demog_feat_dim, 1, bias=True)
 
-        # 7) 3‑way gate
         total_dim = d_emb + mlp_layers[-1] + demog_feat_dim
-        self.gate3    = nn.Sequential(
-            nn.Linear(total_dim, 3),
-            nn.Softmax(dim=1)
-        )
+        # a single linear layer to produce 3 logits
+        self.gate_linear = nn.Linear(total_dim, 3)
+        # a scalar temperature (start at 1.0) to sharpen/soften the Softmax
+        self.temperature = nn.Parameter(torch.tensor(1.0))
+
+        # ─── 5) Normalization for each branch before gating ────────────────
+        self.norm_gmf   = nn.LayerNorm(d_emb)
+        self.norm_mlp   = nn.LayerNorm(mlp_layers[-1])
+        self.norm_demog = nn.LayerNorm(demog_feat_dim)
+
 
         self.lr = lr
 
@@ -131,37 +136,54 @@ class DCHyperNeuMF(pl.LightningModule):
         s_demog   = self.out_demog(dem_in)            # (B,1)
 
         # 6) 3‑way gate & fuse
-        gate_in = torch.cat([gmf_vec, mlp_feat, dem_in], dim=1)  # (B, total_dim)
-        wts     = self.gate3(gate_in)                            # (B,3)
-        scores  = torch.cat([s_gmf, s_mlp, s_demog], dim=1)      # (B,3)
-        pred = (wts * scores).sum(dim=1)
+        gmf_norm   = self.norm_gmf(gmf_vec)    # (B, d_emb)
+        mlp_norm   = self.norm_mlp(mlp_feat)   # (B, mlp_last)
+        dem_norm   = self.norm_demog(dem_in)   # (B, demog_feat_dim)
+
+        # ─── 3‑way gate with temperature ────────────────────────────────────
+        gate_in    = torch.cat([gmf_norm, mlp_norm, dem_norm], dim=1)  # (B, total_dim)
+        logits     = self.gate_linear(gate_in)                         # (B,3)
+        wts        = F.softmax(logits / self.temperature, dim=1)       # (B,3)
+
+        # ─── fuse branch scores ────────────────────────────────────────────
+        scores     = torch.cat([s_gmf, s_mlp, s_demog], dim=1)          # (B,3)
+        pred       = (wts * scores).sum(dim=1)                          # (B,)
         return pred, wts
 
     def training_step(self, batch, batch_idx):
-        d, s_m, s_r, q_m, q_r = batch
-        y_hat, wts = self(d, s_m, s_r, q_m)
+        d, supp_m, supp_r, q_m, q_r = batch   # unpack
 
+        # 1) forward → get preds and gate weights
+        y_hat, wts = self(d, supp_m, supp_r, q_m)
+
+        # 2) main MSE loss
         loss_main = F.mse_loss(y_hat, q_r)
 
-        # if an example has k=0 (you can detect s_m.sum(dim=1)==0), encourage demog gate
-        zero_mask = (s_m.sum(dim=1) == 0).float()   # shape (B,)
+        # 3) auxiliary zero‑shot penalty: when k=0, push gate toward DEMOG
+        zero_mask = (supp_m.sum(dim=1) == 0).float()  # shape (B,)
         if zero_mask.any():
-            # wts is (B,3), we want column 2 (demog)
-            demog_wt = wts[:,2]                     # (B,)
-            # only compute for zero-shot rows
-            aux = ((1.0 - demog_wt) * zero_mask).mean()
-            loss = loss_main + 0.1 * aux            # weight it lightly
+            demog_wt = wts[:, 2]                     # (B,)
+            aux_loss = ((1.0 - demog_wt) * zero_mask).mean()
+            loss = loss_main + 1.0 * aux_loss        # upweight from 0.1→1.0
+            self.log("aux_zero_loss", aux_loss, prog_bar=False)
         else:
             loss = loss_main
 
-        self.log("train_loss", loss)
+        self.log("train_loss", loss, prog_bar=True)
+
+        # 4) log gate‐linear gradient norms to ensure it's learning
+        for name, param in self.gate_linear.named_parameters():
+            if param.grad is not None:
+                self.log(f"grad_norm/{name}", param.grad.norm(), prog_bar=False)
+
         return loss
     
     def validation_step(self, batch, _):
         d, s_m, s_r, q_m, q_r = batch
         y_hat, wts = self(d, s_m, s_r, q_m)
         rmse = torch.sqrt(F.mse_loss(y_hat, q_r))
-        self.log("val_rmse", rmse, prog_bar=True, sync_dist=True)
+        self.log("val_rmse", rmse, prog_bar=True)
+        self.log("temp", self.temperature.item(), prog_bar=False)
         # log the average weight on the demographic branch (index 2)
         self.log("gate_demog_weight", wts[:,2].mean(), prog_bar=True)
 
