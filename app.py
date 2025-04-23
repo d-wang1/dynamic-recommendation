@@ -72,54 +72,42 @@ st.title("🎬 Cold-Start Recommender Demo")
 mode = st.sidebar.radio("Mode", ["Existing User", "New User"])
 topk = st.sidebar.slider("Top-K", 5, 20, 10)
 
-def vectorized_scores(model, demog_row, supp_m, supp_r):
+def vectorized_scores(model, demog_row, supp_m, supp_r, device=None):
+    """
+    Compute model.forward on *every* movie in one giant batch,
+    so the vectorized version is 100% the same as model.forward().
+    Returns:
+      preds: (n_items,) float tensor
+      gates: (n_items, 3) float tensor  (if your forward returns (pred, wts))
+    """
+    model.eval()
+    # what device to live on?
+    if device is None:
+        device = model.item_gmf.weight.device
+
+    # 1) make a 0..N-1 tensor of every movie ID
+    N = model.item_gmf.num_embeddings
+    all_mids = torch.arange(N, device=device, dtype=torch.long)
+
+    # 2) replicate the single‐user info N times
+    #    demog_row: (demog_dim,) → (N, demog_dim)
+    d_rep = demog_row.unsqueeze(0).repeat(N, 1)
+    #    supp_m: (k,) → (N, k), same for supp_r
+    s_m_rep = supp_m.unsqueeze(0).repeat(N, 1)
+    s_r_rep = supp_r.unsqueeze(0).repeat(N, 1)
+
+    # 3) call your model
     with torch.no_grad():
-        # 1) user embeddings
-        u_gmf, u_mlp = model.make_user_embs(
-            demog_row.unsqueeze(0),
-            supp_m.unsqueeze(0),
-            supp_r.unsqueeze(0),
-        )  # both (1, d_emb)
+        out = model(d_rep, s_m_rep, s_r_rep, all_mids)
+        # your forward may return either `preds` or `(preds, gates)`
+        if isinstance(out, tuple):
+            preds, gates = out
+        else:
+            preds, gates = out, None
 
-        # 2) item tables
-        V_gmf   = model.item_gmf.weight      # (N, d_emb)
-        V_mlp   = model.item_mlp.weight      # (N, d_emb)
-        V_demog = model.item_demog.weight    # (N, demog_feat_dim)
-
-        # 3) GMF branch
-        gmf_vec = u_gmf * V_gmf               # broadcasts to (N, d_emb)
-        s_gmf   = model.out_gmf(gmf_vec).squeeze(1)
-
-        # 4) MLP branch
-        um        = u_mlp.repeat(len(V_mlp), 1)    # (N, d_emb)
-        mlp_in    = torch.cat([um, V_mlp], dim=1)  # (N, 2*d_emb)
-        mlp_feats = model.mlp_head(mlp_in)        # (N, mlp_last)
-        s_mlp     = model.out_mlp(mlp_feats).squeeze(1)
-
-        # 5) Demographic branch
-        g = model.gender_emb(demog_row[[0]])
-        raw_age = demog_row[1].item()
-        age_idx = AGE2IDX.get(raw_age, 0)
-        a = model.age_emb(torch.tensor([age_idx], device=demog_row.device))
-        o = model.occ_emb(demog_row[2].unsqueeze(0))
-        z = model.zip_emb(demog_row[3].unsqueeze(0))
-        dem_feat = torch.cat([g, a, o, z], dim=1)    # (1, demog_feat_dim)
-        dem_rep  = dem_feat.repeat(len(V_demog), 1)  # (N, demog_feat_dim)
-        dem_in   = dem_rep * V_demog                 # (N, demog_feat_dim)
-        s_demog  = model.out_demog(dem_in).squeeze(1)
-
-        # 6) normalize for gate
-        gmf_n   = model.norm_gmf(gmf_vec)
-        mlp_n   = model.norm_mlp(mlp_feats)
-        dem_n   = model.norm_demog(dem_in)
-
-        # 7) gated fusion
-        gate_in  = torch.cat([gmf_n, mlp_n, dem_n], dim=1)
-        logits   = model.gate_linear(gate_in)
-        wts      = F.softmax(logits / model.temperature, dim=1)
-        fused    = wts[:,0]*s_gmf + wts[:,1]*s_mlp + wts[:,2]*s_demog
-
-        return fused
+    # 4) squeeze off the extra dim if needed
+    preds = preds.view(-1)
+    return preds, gates
 
 if mode == "Existing User":
     uid = st.selectbox("Select User ID", sorted(ratings_df.uid.unique()))
@@ -129,10 +117,15 @@ if mode == "Existing User":
     st.markdown(f"**Occupation code:** {int(d[2])}  ")
     st.markdown(f"**ZIP prefix:** {int(d[3])}  ")
 
-    user_hist = ratings_df[ratings_df.uid==uid].sort_values("Timestamp", ascending=False)
-    max_k = min(len(user_hist), 10)
-    k = st.slider("Support-set size (k)", 1, max_k, 5)
-    support = user_hist.head(k)
+    # user_hist = ratings_df[ratings_df.uid==uid].sort_values("Timestamp", ascending=False)
+    # max_k = min(len(user_hist), 10)
+    # k = st.slider("Support-set size (k)", 1, max_k, 5)
+    # support = user_hist.head(k)
+
+    #DEBUG: support ratings
+    user_hist = ratings_df[ratings_df.uid==uid] \
+                .sort_values("Timestamp", ascending=False)
+    support   = user_hist.head(5)
 
     st.markdown("#### Support Ratings (edit if you like)")
     support_df = pd.DataFrame({
@@ -149,12 +142,19 @@ if mode == "Existing User":
         edited["Rating"].astype(float).tolist(),
         dtype=torch.float
     )
-
+ 
     if st.button("Recommend"):
-        scores   = vectorized_scores(model, d, supp_m, supp_r)
+        raw_direct, gates_app = model(
+        d.unsqueeze(0),
+        supp_m.unsqueeze(0),
+        supp_r.unsqueeze(0),
+        torch.tensor([1311])
+        )
+        st.write("APP direct → ", raw_direct.item(), "gates→", gates_app.tolist())
+        scores,_   = vectorized_scores(model, d, supp_m, supp_r)
         residuals = scores - global_means
         counts = ratings_df.groupby("mid").size()
-        popular = counts[counts >= 20].index  # only mids with ≥20 ratings
+        popular = counts[counts >= 5].index  # only mids with ≥20 ratings
         residuals[~torch.tensor([m in popular for m in range(len(residuals))])] = -1e6
         vals, idxs = residuals.topk(topk)
 
@@ -194,10 +194,10 @@ else:  # New User
     supp_r = torch.tensor(supp_r_list, dtype=torch.float)
 
     if st.button("Recommend"):
-        scores   = vectorized_scores(model, d_row, supp_m, supp_r)
+        scores,_   = vectorized_scores(model, d_row, supp_m, supp_r)
         residuals = scores - global_means
         counts = ratings_df.groupby("mid").size()
-        popular = counts[counts >= 20].index  # only mids with ≥20 ratings
+        popular = counts[counts >= 5].index  # only mids with ≥20 ratings
         residuals[~torch.tensor([m in popular for m in range(len(residuals))])] = -1e6
         vals, idxs = residuals.topk(topk)
 

@@ -3,9 +3,10 @@ import pandas as pd
 from data.helper import gen_demographic_table, load_ratings, load_save_neumf_table
 from models.hyper_neumf import DCHyperNeuMF
 from data.objs import AGE2IDX, AGE_BUCKET_CODES
+import torch.nn.functional as F
 
 # 1) Paths & hyperparams (adjust to your config)
-CKPT = "checkpoints/epochepoch=80-rmseval_rmse=0.956.ckpt"
+CKPT = "checkpoints/epochepoch=37-rmseval_rmse=0.982.ckpt"
 NEUMF_TABLE = "neumf_movie_tables.pt"
 MOVIES_FILE = "./ml-1m/movies.dat"
 RATINGS_FILE = "./ml-1m/ratings.dat"
@@ -79,8 +80,9 @@ def vector_scores_and_gates(model, d_row):
 
         # 6) gate & fuse
         gate_in = torch.cat([gmf_vec, mlp_feats, dem_in], dim=1)  # (N, sum_dim)
-        wts     = model.gate3(gate_in)                            # (N,3)
-        fused   = wts[:,0]*s_gmf + wts[:,1]*s_mlp + wts[:,2]*s_demog  # (N,)
+        logits   = model.gate_linear(gate_in)
+        wts      = F.softmax(logits / model.temperature, dim=1)
+        fused    = wts[:,0]*s_gmf + wts[:,1]*s_mlp + wts[:,2]*s_demog # (N,)
 
         return fused, wts
 

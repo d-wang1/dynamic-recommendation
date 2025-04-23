@@ -19,6 +19,7 @@ class DCHyperNeuMF(pl.LightningModule):
         demog_dim: int = 4,       # number of raw demog fields
         mlp_layers=(64,32,16),
         lr: float = 1e-3,
+        max_k: int = 10
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -65,7 +66,8 @@ class DCHyperNeuMF(pl.LightningModule):
 
         total_dim = d_emb + mlp_layers[-1] + demog_feat_dim
         # a single linear layer to produce 3 logits
-        self.gate_linear = nn.Linear(total_dim, 3)
+        self.gate_linear = nn.Linear(total_dim + 1, 3)
+        nn.init.constant_(self.gate_linear.bias, 0.0)
         # a scalar temperature (start at 1.0) to sharpen/soften the Softmax
         self.temperature = nn.Parameter(torch.tensor(1.0))
 
@@ -74,7 +76,7 @@ class DCHyperNeuMF(pl.LightningModule):
         self.norm_mlp   = nn.LayerNorm(mlp_layers[-1])
         self.norm_demog = nn.LayerNorm(demog_feat_dim)
 
-
+        self.max_k = max_k
         self.lr = lr
 
     # "First impression" vector 
@@ -109,6 +111,9 @@ class DCHyperNeuMF(pl.LightningModule):
 
     # ----- forward --------------------------------------------------------
     def forward(self, demog_vec, supp_m, supp_r, query_m):
+        B, k = supp_m.size()
+        k_feat = (k / float(self.hparams.max_k))
+        k_feat = k_feat * torch.ones(B,1, device=demog_vec.device)
         # 1) user embs
         u_gmf, u_mlp = self.make_user_embs(demog_vec, supp_m, supp_r)
 
@@ -144,7 +149,7 @@ class DCHyperNeuMF(pl.LightningModule):
         dem_norm   = self.norm_demog(dem_in)   # (B, demog_feat_dim)
 
         # ─── 3‑way gate with temperature ────────────────────────────────────
-        gate_in    = torch.cat([gmf_norm, mlp_norm, dem_norm], dim=1)  # (B, total_dim)
+        gate_in    = torch.cat([gmf_norm, mlp_norm, dem_norm, k_feat], dim=1)  # (B, total_dim)
         logits     = self.gate_linear(gate_in)                         # (B,3)
         wts        = F.softmax(logits / self.temperature, dim=1)       # (B,3)
 
@@ -170,21 +175,28 @@ class DCHyperNeuMF(pl.LightningModule):
         loss_main = F.mse_loss(y_hat, q_r)
 
         # 3) auxiliary zero‑shot penalty: when k=0, push gate toward DEMOG
-        zero_mask = (supp_m.sum(dim=1) == 0).float()  # shape (B,)
+        zero_mask = (supp_m.sum(dim=1) == 0).float()  # (B,)
         if zero_mask.any():
             demog_wt = wts[:, 2]                     # (B,)
             aux_loss = ((1.0 - demog_wt) * zero_mask).mean()
-            loss = loss_main + 1.0 * aux_loss        # upweight from 0.1→1.0
+            loss = loss_main + 0.1 * aux_loss
             self.log("aux_zero_loss", aux_loss, prog_bar=False)
         else:
             loss = loss_main
 
-        self.log("train_loss", loss, prog_bar=True)
+        # 4) entropy regularizer on the gate distribution
+        #    H(w) = - sum_i w_i log(w_i)
+        eps     = 1e-8
+        ent     = -(wts * torch.log(wts + eps)).sum(dim=1).mean()
+        entropy_weight = 0.1   # tune this (e.g. 0.01–1.0)
+        self.log("gate_entropy", ent, prog_bar=False)
+        loss = loss - entropy_weight * ent
 
-        # 4) log gate‐linear gradient norms to ensure it's learning
-        for name, param in self.gate_linear.named_parameters():
-            if param.grad is not None:
-                self.log(f"grad_norm/{name}", param.grad.norm(), prog_bar=False)
+        # 5) log everything & return
+        self.log("train_loss", loss, prog_bar=True)
+        # also log your LR so you can sanity check
+        lr = self.trainer.optimizers[0].param_groups[0]["lr"]
+        self.log("active_lr", lr, prog_bar=True)
 
         return loss
     
