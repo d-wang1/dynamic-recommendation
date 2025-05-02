@@ -78,6 +78,8 @@ class DCHyperNeuMF(pl.LightningModule):
 
         self.max_k = max_k
         self.lr = lr
+        
+
 
     # "First impression" vector 
     def make_user_embs(self, demog_vec, movie_ids, ratings):
@@ -166,37 +168,66 @@ class DCHyperNeuMF(pl.LightningModule):
         return pred, wts
 
     def training_step(self, batch, batch_idx):
-        d, supp_m, supp_r, q_m, q_r = batch   # unpack
+        d, supp_m, supp_r, q_m, q_r = batch   # (B, ...)
 
-        # 1) forward → get preds and gate weights
-        y_hat, wts = self(d, supp_m, supp_r, q_m)
+        # ─── 1) Positive prediction ─────────────────────────────────
+        pos_pred, wts = self(d, supp_m, supp_r, q_m)       # (B,)
 
-        # 2) main MSE loss
-        loss_main = F.mse_loss(y_hat, q_r)
+        # ─── 2) Sample one random negative per example ────────────
+        #    uniform over all movies; you could also bias to unpopular ones
+        neg_m = torch.randint(
+            0,
+            self.hparams.n_movies,
+            q_m.shape,
+            device=q_m.device,
+            dtype=torch.long
+        )
+        neg_pred, _ = self(d, supp_m, supp_r, neg_m)        # (B,)
 
-        # 3) auxiliary zero‑shot penalty: when k=0, push gate toward DEMOG
-        zero_mask = (supp_m.sum(dim=1) == 0).float()  # (B,)
+        # ─── 3) BPR loss: −log σ(pos − neg) ─────────────────────
+        bpr_loss = -torch.log(torch.sigmoid(pos_pred - neg_pred) + 1e-8).mean()
+        self.log("train/bpr_loss", bpr_loss, prog_bar=False)
+
+        # ─── 4) MSE regression loss (anchor absolute scale) ───────
+        mse_loss = F.mse_loss(pos_pred, q_r)
+        self.log("train/mse_loss", mse_loss, prog_bar=False)
+
+        # ─── 5) Zero‑shot auxiliary (keep as you had it) ──────────
+        zero_mask = (supp_m.sum(dim=1) == 0).float()           # (B,)
         if zero_mask.any():
-            demog_wt = wts[:, 2]                     # (B,)
-            aux_loss = ((1.0 - demog_wt) * zero_mask).mean()
-            loss = loss_main + 0.1 * aux_loss
-            self.log("aux_zero_loss", aux_loss, prog_bar=False)
+            demog_wt = wts[:, 2]                              # (B,)
+            aux_zero = ((1.0 - demog_wt) * zero_mask).mean()
         else:
-            loss = loss_main
+            aux_zero = torch.tensor(0.0, device=pos_pred.device)
+        self.log("train/aux_zero", aux_zero, prog_bar=False)
 
-        # 4) entropy regularizer on the gate distribution
-        #    H(w) = - sum_i w_i log(w_i)
-        eps     = 1e-8
-        ent     = -(wts * torch.log(wts + eps)).sum(dim=1).mean()
-        entropy_weight = 0.1   # tune this (e.g. 0.01–1.0)
-        self.log("gate_entropy", ent, prog_bar=False)
-        loss = loss - entropy_weight * ent
+        # ─── 6) Entropy regularizer on gate ──────────────────────
+        ent = -(wts * torch.log(wts + 1e-8)).sum(dim=1).mean()
+        entropy_weight = 0.1
+        self.log("train/gate_entropy", ent, prog_bar=False)
 
-        # 5) log everything & return
-        self.log("train_loss", loss, prog_bar=True)
-        # also log your LR so you can sanity check
+        # ─── 7) L₂ regularization on gate_linear weights ──────────
+        reg_weight = 1e-5
+        l2_reg = 0.0
+        for p in self.gate_linear.parameters():
+            l2_reg += p.pow(2).sum()
+        l2_reg = reg_weight * l2_reg
+        self.log("train/l2_gate", l2_reg, prog_bar=False)
+
+        # ─── 8) Combine everything ────────────────────────────────
+        #    you can tune these scalars to balance
+        loss = (
+              1.0 * bpr_loss
+            + 0.5 * mse_loss
+            + 0.5 * aux_zero
+            - 0.1 * ent
+            + l2_reg
+        )
+        self.log("train/total_loss", loss, prog_bar=True)
+
+        # also log LR for sanity
         lr = self.trainer.optimizers[0].param_groups[0]["lr"]
-        self.log("active_lr", lr, prog_bar=True)
+        self.log("train/lr", lr, prog_bar=False)
 
         return loss
     
@@ -211,4 +242,8 @@ class DCHyperNeuMF(pl.LightningModule):
 
 
     def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(), lr=self.lr)
+        return torch.optim.Adam(
+            self.parameters(),
+            lr=self.lr,
+            weight_decay=1e-6   # small global L₂
+        )
