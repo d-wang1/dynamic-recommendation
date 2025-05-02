@@ -1,191 +1,88 @@
-# debug_pipeline.py
 import torch
-from data.helper import gen_datamodule, load_save_neumf_table, load_config
-from models.hyper_neumf import DCHyperNeuMF
-from data.objs import AGE2IDX
-import torch.nn.functional as F
-from data.helper import gen_demographic_table
 from pathlib import Path
+from data.objs import AGE2IDX
 
-def load_everything():
-    cfg = load_config("config.json")
-    # 1) build datamodule with k=3
-    dm, n_users, n_movies, demog = gen_datamodule(k=3,
-                                                  test_size=0.2,
-                                                  random_state=42,
-                                                  verbose=False)
-    # 2) load pretrained tables
-    item_gmf, item_mlp = load_save_neumf_table("config.json")
-    # 3) rebuild model
-    ckpt = cfg["app"]["ckpt_to_use"]
-    model = DCHyperNeuMF.load_from_checkpoint(ckpt, strict=False)
-    model.item_gmf.weight.data.copy_(item_gmf)
-    model.item_mlp.weight.data.copy_(item_mlp)
-    for p in model.item_gmf.parameters():
-        p.requires_grad_(False)
-    for p in model.item_mlp.parameters():
-        p.requires_grad_(False)
-    model.eval()
-    return dm, demog, model
+from data.helper import (
+    load_config,
+    gen_demographic_table,
+    load_save_neumf_table,
+    load_movies,
+    load_ratings,
+)
+from models.hyper_neumf import DCHyperNeuMF
 
-def test_dataloader(dm):
-    print("==> Testing dataloader shapes & one batch")
-    loader = dm.val_dataloader()
-    batch = next(iter(loader))
-    d, s_m, s_r, q_m, q_r = batch
-    print("demog shape      ", d.shape)
-    print("demog values     ", d[2,:])
-    print("support movies   ", s_m.shape)
-    print("support movies  ", s_m[0,:])
-    print("support ratings  ", s_r.shape)
-    print("support ratings ", s_r[0,:])
-    print("query movies     ", q_m.shape)
-    # print("query movies    ", q_m)
-    print("query ratings    ", q_r.shape)
-    # print("query ratings   ", q_r)
-    # are any supports length zero?
-    zeros = (s_m.sum(dim=1)==0).sum().item()
-    print("zero‐support rows:", zeros, "/", d.size(0))
-
-def test_support_encoder(model, demog):
-    print("\n==> Testing SupportSetEncoder")
-    enc = model.supenc
-    # try k=0
-    empty_m = torch.empty((2,0), dtype=torch.long)
-    empty_r = torch.empty((2,0), dtype=torch.float)
-    z = enc(empty_m, empty_r)
-    print(" k=0 →", z.shape, " all zeros? ", bool(z.abs().sum().item()==0))
-    # try random k=3
-    mids = torch.randint(0, model.item_mlp.num_embeddings, (2,3))
-    rates = torch.rand((2,3))*4+1
-    y = enc(mids, rates)
-    print(" k=3 →", y.shape, " sample:", y[0,:5])
-
-def test_forward_batch(dm, demog, model):
-    print("\n==> Testing full forward on a handful of users")
-    loader = dm.val_dataloader()
-    batch = next(iter(loader))
-    d, s_m, s_r, q_m, q_r = batch
-    # pick 3 random rows
-    for i in [0,1,2]:
-        di = d[i].unsqueeze(0)
-        sm = s_m[i].unsqueeze(0)
-        sr = s_r[i].unsqueeze(0)
-        qm = q_m[i].unsqueeze(0)
-        # forward
-        with torch.no_grad():
-            out = model(di, sm, sr, qm)
-        print(f" user {i} → forward output type: {type(out)} ; values:", out[:5])
-
-def scan_gate_weights(dm, demog, model):
-    print("\n==> Scanning gate weights over entire val set")
-    loader = dm.val_dataloader()
-    all_ws = []
-    for batch in loader:
-        d, s_m, s_r, q_m, q_r = batch
-        with torch.no_grad():
-            _, wts = model(d, s_m, s_r, q_m)
-        all_ws.append(wts.cpu())
-    all_ws = torch.cat(all_ws, dim=0)
-    print(" gate weights shape:", all_ws.shape)
-    print("  avg per branch:", all_ws.mean(dim=0))
-    print("   min / max per branch:", all_ws.min(dim=0)[0], all_ws.max(dim=0)[0])
-
-def vectorized_scores(model, demog_row, supp_m, supp_r, device=None):
+def vectorized_scores(model, demog_row, supp_m, supp_r):
     """
-    Compute model.forward on *every* movie in one giant batch,
-    so the vectorized version is 100% the same as model.forward().
-    Returns:
-      preds: (n_items,) float tensor
-      gates: (n_items, 3) float tensor  (if your forward returns (pred, wts))
+    Score every movie for one user in one go using the vector‐GMF + MLP + demog fusion.
+    Returns a tensor of shape (n_items,) of raw predictions.
     """
-    model.eval()
-    # what device to live on?
-    if device is None:
-        device = model.item_gmf.weight.device
-
-    # 1) make a 0..N-1 tensor of every movie ID
-    N = model.item_gmf.num_embeddings
-    all_mids = torch.arange(N, device=device, dtype=torch.long)
-
-    # 2) replicate the single‐user info N times
-    #    demog_row: (demog_dim,) → (N, demog_dim)
-    d_rep = demog_row.unsqueeze(0).repeat(N, 1)
-    #    supp_m: (k,) → (N, k), same for supp_r
-    s_m_rep = supp_m.unsqueeze(0).repeat(N, 1)
-    s_r_rep = supp_r.unsqueeze(0).repeat(N, 1)
-
-    # 3) call your model
     with torch.no_grad():
-        out = model(d_rep, s_m_rep, s_r_rep, all_mids)
-        # your forward may return either `preds` or `(preds, gates)`
-        if isinstance(out, tuple):
-            preds, gates = out
-        else:
-            preds, gates = out, None
+        # 1) Build user embeddings
+        u_gmf, u_mlp = model.make_user_embs(
+            demog_row.unsqueeze(0),            # (1, demog_dim)
+            supp_m.unsqueeze(0),               # (1, k)
+            supp_r.unsqueeze(0),               # (1, k)
+        )                                       # each (1, d_emb)
 
-    # 4) squeeze off the extra dim if needed
-    preds = preds.view(-1)
-    return preds, gates
+        # 2) Frozen item tables
+        V_gmf   = model.item_gmf.weight       # (n_items, d_emb)
+        V_mlp   = model.item_mlp.weight       # (n_items, d_emb)
+        V_demog = model.item_demog.weight     # (n_items, demog_feat_dim)
 
-def compare_vector_vs_forward(model, demog_row, supp_m, supp_r, query_mid):
-    """
-    Compare model.forward on one movie vs. our vectorized_scores over all movies.
-    Prints and returns:
-      - direct_pred  : float
-      - vector_pred  : float
-      - direct_gates : [g_gmf, g_mlp, g_demog]
-      - vector_gates : [g_gmf, g_mlp, g_demog]
-    """
-    model.eval()
-    device = demog_row.device
+        # 3) GMF branch
+        gmf_vec = u_gmf * V_gmf                # (n_items, d_emb)
+        s_gmf   = model.out_gmf(gmf_vec).squeeze(1)
 
-    # 1) Direct single‐movie call
-    #    demog_row: (demog_dim,) → (1, demog_dim)
-    #    supp_m, supp_r: each (k,) → (1, k)
-    #    query_mid: single int → (1,)
-    direct_out = model(
-        demog_row.unsqueeze(0),
-        supp_m.unsqueeze(0),
-        supp_r.unsqueeze(0),
-        torch.tensor([query_mid], device=device)
-    )
-    if isinstance(direct_out, tuple):
-        direct_pred_tensor, direct_gates_tensor = direct_out
-    else:
-        direct_pred_tensor, direct_gates_tensor = direct_out, None
+        # 4) MLP branch
+        um        = u_mlp.repeat(len(V_mlp), 1)
+        mlp_feat  = model.mlp_head(torch.cat([um, V_mlp], dim=1))
+        s_mlp     = model.out_mlp(mlp_feat).squeeze(1)
 
-    direct_pred = direct_pred_tensor.item()
-    direct_gates = direct_gates_tensor.squeeze(0).tolist() if direct_gates_tensor is not None else None
+        # 5) Demog branch
+        # rebuild demog_feats exactly as in forward:
+        # (you can also call model._build_demog_feats(demog_row) if you factor that out)
+        g = model.gender_emb(demog_row[[0]])
+        raw_age   = demog_row[1].item()                       # e.g. 18 or 56
+        idx0_6    = AGE2IDX.get(raw_age, 0)                   # map into 0..6
+        age_tensor= torch.tensor([idx0_6], device=demog_row.device)
+        a         = model.age_emb(age_tensor)
+        o = model.occ_emb(demog_row[2].unsqueeze(0))
+        z = model.zip_emb(demog_row[3].unsqueeze(0))
+        dem_feats = torch.cat([g, a, o, z], dim=1).repeat(len(V_demog), 1)
+        dem_in    = dem_feats * V_demog
+        s_demog   = model.out_demog(dem_in).squeeze(1)
 
-    # 2) Vectorized over all N movies
-    all_preds, all_gates = vectorized_scores(model, demog_row, supp_m, supp_r)
+        # 6) Fuse via gating
+        # normalize
+        n_g = model.norm_gmf(gmf_vec)
+        n_m = model.norm_mlp(mlp_feat)
+        n_d = model.norm_demog(dem_in)
+        # k-feature (optional; remove if you dropped it)
+        k = supp_m.numel()
+        max_k = getattr(model.hparams, "max_k", k)
+        k_feat = torch.full((len(V_gmf),1), fill_value=k/float(max_k), device=gmf_vec.device)
+        # build gate input
+        gate_in = torch.cat([n_g, n_m, n_d, k_feat], dim=1)
+        logits  = model.gate_linear(gate_in)
+        wts     = torch.softmax(logits / model.temperature, dim=1)
 
-    vector_pred = all_preds[query_mid].item()
-    vector_gates = all_gates[query_mid].tolist() if all_gates is not None else None
-
-    # 3) Report
-    print(f"\n=== Comparing for query_mid={query_mid} ===")
-    print(f"Direct   pred: {direct_pred:.6f}")
-    print(f"Vector   pred: {vector_pred:.6f}")
-    print(f"Direct   gates: {direct_gates}")
-    print(f"Vector   gates: {vector_gates}\n")
-
-    return direct_pred, vector_pred, direct_gates, vector_gates
-
+        # final
+        fused = wts[:,0]*s_gmf + wts[:,1]*s_mlp + wts[:,2]*s_demog
+        return fused
 
 def main():
+    # ─── 1) Setup ─────────────────────────────────────────────────────────
     cfg = load_config("config.json")
+
+    # pretrained NeuMF tables
     item_gmf, item_mlp = load_save_neumf_table(
         config_path="config.json",
         verbose=cfg.get("verbose", False),
     )
 
-    # --- rebuild & freeze your hyper-model ---
+    # rebuild & freeze your HyperNeuMF
     ckpt_path = Path(cfg["app"]["ckpt_to_use"]).expanduser().resolve()
     model: DCHyperNeuMF = DCHyperNeuMF.load_from_checkpoint(str(ckpt_path))
-
-    # copy in the frozen NeuMF tables
     model.item_gmf.weight.data.copy_(item_gmf)
     model.item_mlp.weight.data.copy_(item_mlp)
     for p in model.item_gmf.parameters():
@@ -194,39 +91,94 @@ def main():
         p.requires_grad_(False)
     model.eval()
 
-    # --- load ratings & demographics ---
+    # demographics & ratings
     ratings_df, demog_tensor, n_users, n_items = gen_demographic_table(
         config_path="config.json",
         verbose=cfg.get("verbose", False),
     )
     print(f"Loaded {n_users} users, {n_items} movies, {len(ratings_df)} ratings.")
-    
 
-    
-    # --- pick a toy user & support set ---
-    uid = 0
-    user_hist = ratings_df[ratings_df.uid==uid] \
-                .sort_values("Timestamp", ascending=False)
-    supp       = user_hist.head(5)
-    print(f"Support set for user {uid}:\n", supp)
-    supp_m = torch.tensor(supp.mid.values, dtype=torch.long)
-    supp_r = torch.tensor(supp.Rating.values, dtype=torch.float)
+    # movie titles
+    raw_ratings = load_ratings("config.json")
+    mid_map = {m:i for i,m in enumerate(raw_ratings.MovieID.unique())}
+    movies_df = load_movies("config.json")
+    titles = [None]*n_items
+    for _, row in movies_df.iterrows():
+        idx = mid_map.get(row.MovieID)
+        if idx is not None:
+            titles[idx] = row.Title
+
+    # global mean popularity
+    gm = ratings_df.groupby("mid")["Rating"].mean().reset_index()
+    global_means = torch.zeros(n_items)
+    for _, r in gm.iterrows():
+        global_means[int(r.mid)] = r.Rating
+
+
+    print(ratings_df.head())
+    # ─── 2) Choose a user & support-set ────────────────────────────────────
+    uid = 1
+    user_hist = ratings_df[ratings_df.uid==uid].sort_values("Timestamp", ascending=False)
+    k = 3
+    support = user_hist.head(k)
+    supp_m = torch.tensor(support.mid.values, dtype=torch.long)
+    supp_r = torch.tensor(support.Rating.values, dtype=torch.float)
     demog_row = demog_tensor[uid]
 
-    # --- pick a query movie (e.g. the (k+1)-th that user saw) ---
-    # query_mid = int(user_hist.iloc[k].mid)
-    query_mid = 318
-    pred_direct, gates = model(
-    demog_row.unsqueeze(0),
-    supp_m.unsqueeze(0),
-    supp_r.unsqueeze(0),
-    torch.tensor([query_mid])
-    )
-    print("DEBUG direct → ", pred_direct.item(), "gates → ", gates)
-    # --- run the compare ---
-    compare_vector_vs_forward(model, demog_row, supp_m, supp_r, query_mid)
+    # ─── 3) Score & display ────────────────────────────────────────────────
+    USE_DELTAS = True    # False to sort by raw score
+    USE_SHRINK = True    # apply Bayesian shrinkage toward overall mean
+    USE_FILTER = False   # filter out ultra‐rare movies (< min_count)
 
+    # 1) get your model’s raw scores for all n_items
+    scores = vectorized_scores(model, demog_row, supp_m, supp_r)  # (n_items,)
+    device = scores.device
+    n_items = scores.size(0)
 
+    if USE_DELTAS:
+        # 2) build counts as a torch tensor on the same device
+        counts_series = ratings_df.groupby("mid").size().reindex(range(n_items), fill_value=0)
+        counts = torch.tensor(counts_series.values,
+                            dtype=torch.float32,
+                            device=device)          # (n_items,)
+
+        # 3) your global_means is already a torch tensor of shape (n_items,)
+        raw_means = global_means.to(device)  # just ensure it’s on the right device
+
+        # 4) overall float mean of all ratings
+        overall_mean = float(ratings_df.Rating.mean())
+
+        if USE_SHRINK:
+            m = 20.0
+            # Bayesian shrinkage: (count * item_mean + m * global_mean) / (count + m)
+            pop_baseline = (counts * raw_means + m * overall_mean) / (counts + m)
+        else:
+            pop_baseline = raw_means
+
+        # 5) compute deltas
+        deltas = scores - pop_baseline
+
+        # 6) optionally filter out ultra‐rare movies
+        if USE_FILTER:
+            min_count = 20
+            mask = counts >= min_count                            # bool tensor
+            deltas = torch.where(mask, deltas, torch.full_like(deltas, -1e6))
+
+        # 7) take Top-K by Δ
+        top_vals, top_idxs = deltas.topk(10)
+
+        print("\nTop-10 by Δ:")
+        for delta, idx in zip(top_vals.tolist(), top_idxs.tolist()):
+            print(f"- {titles[idx]}  "
+                f"(pred={scores[idx]:.2f}, pop={pop_baseline[idx]:.2f}, Δ={delta:+.2f})")
+
+    else:
+        # Top-K by raw prediction
+        top_vals, top_idxs = scores.topk(10)
+        print("\nTop-10 by raw score:")
+        for pred, idx in zip(top_vals.tolist(), top_idxs.tolist()):
+            pop = global_means[idx].item()
+            print(f"- {titles[idx]}  (pred={pred:.2f}, pop={pop:.2f}, Δ={pred - pop:+.2f})")
 
 if __name__ == "__main__":
     main()

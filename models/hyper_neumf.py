@@ -19,7 +19,7 @@ class DCHyperNeuMF(pl.LightningModule):
         demog_dim: int = 4,       # number of raw demog fields
         mlp_layers=(64,32,16),
         lr: float = 1e-3,
-        max_k: int = 10
+        max_k: int = 3
     ):
         super().__init__()
         self.save_hyperparameters()
