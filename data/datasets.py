@@ -28,7 +28,7 @@ class ColdStartDataset(Dataset):
         q_m, q_r = zip(*query)
         return (
             uid,
-            torch.tensor(self.demog[uid]),
+            self.demog[uid].clone().detach(),
             torch.tensor(supp_m, dtype=torch.long),
             torch.tensor(supp_r, dtype=torch.float),
             torch.tensor(q_m, dtype=torch.long),
