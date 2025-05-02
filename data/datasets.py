@@ -37,40 +37,56 @@ class ColdStartDataset(Dataset):
 
 
 class ML1MDataModule(pl.LightningDataModule):
-    def __init__(self, train_df, val_df, demog, batch_size=256, k=3, k_range=(0,3)):
+    def __init__(
+        self,
+        train_df, val_df, demog,
+        batch_size=256,
+        k_range=(0,3,5,10),
+        k_max: int = 10,
+    ):
         super().__init__()
-        self.train = ColdStartDataset(train_df, demog, k)
-        self.val   = ColdStartDataset(val_df,   demog, k)
-        self.bs    = batch_size
-        self.k_max = k
-        self.k_range = k_range  # e.g. (0,3)
+        # we no longer pass a fixed k into the dataset—support‐set size is chosen in collate
+        self.train   = ColdStartDataset(train_df, demog)
+        self.val     = ColdStartDataset(val_df,   demog)
+        self.bs      = batch_size
+        self.k_range = k_range  # e.g. (0,3,5,10)
+        self.k_max   = k_max    # always pad to this length
 
     def collate(self, batch):
         uids, demo, s_m, s_r, q_m, q_r = zip(*batch)
 
-        # randomly choose k' for each example in the *train* loader:
+        # 1) pick k' for each example
         if self._is_training:
-            k_prime = torch.randint(self.k_range[0], self.k_range[1]+1, (len(batch),))
+            lo, hi = min(self.k_range), max(self.k_range)
+            # sample uniformly from {lo, lo+1, …, hi}
+            k_prime = torch.randint(lo, hi + 1, (len(batch),))
         else:
-            # keep full support in validation
-            k_prime = torch.full((len(batch),), self.k_range[1], dtype=torch.long)
+            # always use the maximum support size at validation
+            k_prime = torch.full(
+                (len(batch),),
+                fill_value=self.k_max,
+                dtype=torch.long,
+            )
 
-        # for each example i, take only the first k_prime[i] support pairs
+        # 2) trim each support‐set down to k_prime[i]
         new_s_m, new_s_r = [], []
         for i, (movies, ratings) in enumerate(zip(s_m, s_r)):
             kp = k_prime[i].item()
             new_s_m.append(movies[:kp])
             new_s_r.append(ratings[:kp])
 
-        # now pad to max_k again, just like before
-        max_k = max(len(x) for x in new_s_m)
-        pad = lambda lst, fill: [list(x) + [fill]*(max_k-len(x)) for x in lst]
-        s_m = torch.tensor(pad(new_s_m, 0))
-        s_r = torch.tensor(pad(new_s_r, 3.5))
+        # 3) pad *all* to self.k_max (not dynamic)
+        pad_to = self.k_max
+        def pad(list_of_lists, fill_value):
+            return [list(x) + [fill_value] * (pad_to - len(x)) for x in list_of_lists]
 
+        s_m = torch.tensor(pad(new_s_m, 0), dtype=torch.long)
+        s_r = torch.tensor(pad(new_s_r, 3.5), dtype=torch.float)
+
+        # 4) the rest stays the same
         demo = torch.stack(demo)
-        q_m  = torch.tensor([x[0] for x in q_m])
-        q_r  = torch.tensor([x[0] for x in q_r])
+        q_m  = torch.tensor([x[0] for x in q_m], dtype=torch.long)
+        q_r  = torch.tensor([x[0] for x in q_r], dtype=torch.float)
         return demo, s_m, s_r, q_m, q_r
 
     def train_dataloader(self):

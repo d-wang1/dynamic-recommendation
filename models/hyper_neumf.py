@@ -19,10 +19,10 @@ class DCHyperNeuMF(pl.LightningModule):
         demog_dim: int = 4,       # number of raw demog fields
         mlp_layers=(64,32,16),
         lr: float = 1e-3,
-        max_k: int = 3
+        max_k: int = 3,           # <-- new
     ):
         super().__init__()
-        self.save_hyperparameters()
+        self.save_hyperparameters("n_movies","d_emb","demog_dim","mlp_layers","lr","max_k")
 
         # 1) Item tables (unchanged)
         self.item_gmf = nn.Embedding(n_movies, d_emb)
@@ -149,7 +149,7 @@ class DCHyperNeuMF(pl.LightningModule):
         dem_norm   = self.norm_demog(dem_in)   # (B, demog_feat_dim)
 
         # ─── 3‑way gate with temperature ────────────────────────────────────
-        gate_in    = torch.cat([gmf_norm, mlp_norm, dem_norm, k_feat], dim=1)  # (B, total_dim)
+        gate_in    = torch.cat([gmf_norm, mlp_norm, dem_norm, k_feat], dim=1)
         logits     = self.gate_linear(gate_in)                         # (B,3)
         wts        = F.softmax(logits / self.temperature, dim=1)       # (B,3)
 

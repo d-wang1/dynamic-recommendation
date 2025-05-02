@@ -11,14 +11,16 @@
         "d_emb": 8,
         "mlp_layers": [64, 32, 16],
         "lr": 1e-3,
-        "batch_size": 256
+        "batch_size": 256,
+        "k": [0, 3, 5, 10],
+        "max_k": 10
     },
     "comet_logger": {
         "api_key": "mtz39dGMtfA0IRQ957SdlU8G1"
     },
     "verbose": true,
     "train": {
-        "max_epochs": 40,
+        "max_epochs": 80,
         "accelerator": "auto",
         "num_workers": 7,
         "log_every_n_steps": 20,

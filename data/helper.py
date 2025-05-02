@@ -113,7 +113,7 @@ def load_save_neumf_table(config_path = None, verbose=False):
     return item_gmf, item_mlp
 
 
-def gen_datamodule(k=3, test_size=0.2, ratings = load_ratings(), random_state=42, verbose=False):
+def gen_datamodule(k_list, max_k: int, test_size=0.2, ratings = load_ratings(), random_state=42, verbose=False):
     # k-shot split
     if verbose:
         print("Loading data and demographic table...")
@@ -127,9 +127,15 @@ def gen_datamodule(k=3, test_size=0.2, ratings = load_ratings(), random_state=42
     val_df   = ratings[ratings.uid.isin(val_uids)]
     if verbose:
         print(f"Train set size: {len(train_df)}, Validation set size: {len(val_df)}")
-    dm = ML1MDataModule(train_df, val_df, demog,
-                    batch_size=256,
-                    k=3)
+    dm = ML1MDataModule(
+        train_df,
+        val_df,
+        demog,
+        batch_size=256,
+        k_range=tuple(k_list),   # e.g. (0,3,5,10)
+        k_max=max_k,             # e.g. 10
+    )
     if verbose:
         print("Data module created.")
     return dm, n_users, n_movies, demog
+
