@@ -25,3 +25,10 @@ Explore methods for dynamic recommendation systems for CSE543. Authored by David
 - For logging, either set the comet API key via `export COMET_API_KEY="yourapikey"` or change the api key value in `config.json` (not recommended for final release)
 - Activate venv via step 3 in setup
 - `python train.py`
+
+
+# Evaluation
+
+- To change the checkpoint location, modify `app.ckpt_to_use` in `config.json`
+- To get statistics such as MSRE and Precision@K, run `eval.py`
+- To get sample user recommendations, run `test_outputs.py`

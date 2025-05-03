@@ -117,7 +117,7 @@ def main():
 
     print(ratings_df.head())
     # ─── 2) Choose a user & support-set ────────────────────────────────────
-    uid = 1
+    uid = 0
     user_hist = ratings_df[ratings_df.uid==uid].sort_values("Timestamp", ascending=False)
     k = 3
     support = user_hist.head(k)
