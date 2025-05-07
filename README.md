@@ -30,5 +30,5 @@ Explore methods for dynamic recommendation systems for CSE543. Authored by David
 # Evaluation
 
 - To change the checkpoint location, modify `app.ckpt_to_use` in `config.json`
-- To get statistics such as MSRE and Precision@K, run `eval.py`
+- To get statistics such as RMSE, run `eval.py`
 - To get sample user recommendations, run `test_outputs.py`

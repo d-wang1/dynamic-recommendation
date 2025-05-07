@@ -71,7 +71,6 @@ def vectorized_scores(model, demog_row, supp_m, supp_r):
         return fused
 
 def main():
-    # ─── 1) Setup ─────────────────────────────────────────────────────────
     cfg = load_config("config.json")
 
     # pretrained NeuMF tables
@@ -116,7 +115,6 @@ def main():
 
 
     print(ratings_df.head())
-    # ─── 2) Choose a user & support-set ────────────────────────────────────
     uid = 1
     user_hist = ratings_df[ratings_df.uid==uid].sort_values("Timestamp", ascending=False)
     k = 3
@@ -125,7 +123,6 @@ def main():
     supp_r = torch.tensor(support.Rating.values, dtype=torch.float)
     demog_row = demog_tensor[uid]
 
-    # ─── 3) Score & display ────────────────────────────────────────────────
     USE_DELTAS = True    # False to sort by raw score
     USE_SHRINK = False    # apply Bayesian shrinkage toward overall mean
     USE_FILTER = False   # filter out ultra‐rare movies (< min_count)

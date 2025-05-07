@@ -1,5 +1,3 @@
-# eval.py
-
 import torch
 from pathlib import Path
 from torch.utils.data import DataLoader
@@ -15,7 +13,6 @@ from data.helper import (
 from models.hyper_neumf import DCHyperNeuMF
 from data.objs import AGE2IDX
 
-# ─── unchanged ────────────────────────────────────────────────────────────
 def vectorized_scores(model, demog_row, supp_m, supp_r):
     with torch.no_grad():
         u_gmf, u_mlp = model.make_user_embs(
@@ -61,7 +58,6 @@ def vectorized_scores(model, demog_row, supp_m, supp_r):
         return wts[:,0]*s_gmf + wts[:,1]*s_mlp + wts[:,2]*s_demog
 
 
-# ─── 1) RMSE (unchanged) ─────────────────────────────────────────────────
 def compute_rmse(model, datamodule, device="cpu"):
     loader = datamodule.val_dataloader()
     model.to(device).eval()
@@ -75,7 +71,6 @@ def compute_rmse(model, datamodule, device="cpu"):
     return (total_se/total_n)**0.5
 
 
-# ─── 2) Precision@5 with multiple ranking methods ────────────────────────
 def compute_precision_at_5(
     model,
     datamodule,
@@ -108,7 +103,6 @@ def compute_precision_at_5(
 
                 scores = vectorized_scores(model, dr, sm, sr)
 
-                # apply ranking method
                 if method=="raw":
                     sco = scores
                 elif method=="residual":
@@ -135,11 +129,9 @@ def compute_precision_at_5(
     return hits/total if total>0 else 0.0
 
 
-# ─── 3) main: loop over each support‐set size and each method ───────────
 def main():
     cfg = load_config("config.json")
 
-    # 3.1) full ratings + demographics
     ratings_df, demog_tensor, n_users, n_items = gen_demographic_table(
         config_path="config.json",
         verbose=cfg.get("verbose",False),
