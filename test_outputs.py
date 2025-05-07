@@ -117,7 +117,7 @@ def main():
 
     print(ratings_df.head())
     # ─── 2) Choose a user & support-set ────────────────────────────────────
-    uid = 0
+    uid = 1
     user_hist = ratings_df[ratings_df.uid==uid].sort_values("Timestamp", ascending=False)
     k = 3
     support = user_hist.head(k)
@@ -127,7 +127,7 @@ def main():
 
     # ─── 3) Score & display ────────────────────────────────────────────────
     USE_DELTAS = True    # False to sort by raw score
-    USE_SHRINK = True    # apply Bayesian shrinkage toward overall mean
+    USE_SHRINK = False    # apply Bayesian shrinkage toward overall mean
     USE_FILTER = False   # filter out ultra‐rare movies (< min_count)
 
     # 1) get your model’s raw scores for all n_items
