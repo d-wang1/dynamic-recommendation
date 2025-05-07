@@ -6,7 +6,7 @@ Explore methods for dynamic recommendation systems for CSE543. Authored by David
 
    
 1. Use `uv` for package handling. It should exist in the venv, but if it doesn't, `pip install uv`.
-2. Run `uv init` 
+2. Run `uv init` if `pyproject.toml` does not exist. If it does, run `uv sync --frozen`
 3. Activate the venv via `source venv/bin/activate` on Mac/Linux and `.\venv\Scripts\activate` on Windows. 
    *Don't track the venv by adding it to the `.gitignore` file (via the following line: `venv`)*
 4. To add new requirements / packages, run `uv add <package>`, e.g. `uv add pandas`
